@@ -1,0 +1,53 @@
+[package]
+name = "slicer-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "protype-slicer-daemon"
+path = "src/main.rs"
+
+[features]
+# When enabled, slicer-pipeline + slicer-ffi compile against the real
+# libslic3r static archive (produced by `scripts/build_libslic3r.sh`).
+# When NOT enabled (default), the FFI bridge falls back to its built-in
+# stub that returns deterministic rectangle G-code. The stub keeps the
+# daemon useful for CI smoke runs, packaging validation, and Windows /
+# Linux builds where libslic3r hasn't been wired into the build yet.
+default = []
+# `slicer-rpc` belongs in this list and its absence was a real bug: the
+# feature is what compiles the B-rep branch of `geometry.build` in, and
+# without it a daemon with OCCT fully linked still answered every build
+# with "this daemon was built without OCCT" and fell back to the mesh
+# kernel. Nothing in `cargo test` could see it — the tests enable the
+# feature on `slicer-rpc` directly.
+with-libslic3r = [
+    "slicer-pipeline/with-libslic3r",
+    "slicer-ffi/with-libslic3r",
+    "slicer-rpc/with-libslic3r",
+]
+
+[dependencies]
+slicer-types = { path = "../slicer-types" }
+slicer-state = { path = "../slicer-state" }
+slicer-pipeline = { path = "../slicer-pipeline" }
+slicer-rpc = { path = "../slicer-rpc" }
+slicer-ffi = { path = "../slicer-ffi" }
+slicer-monitor = { path = "../slicer-monitor", features = ["moonraker"] }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+serde_json = { workspace = true }
+schemars = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+
+[dev-dependencies]
+# The isolation test writes CSG trees by hand; the daemon itself only
+# ever passes them through.
+slicer-geometry = { path = "../slicer-geometry" }
+# `surface_tests` reads PUBLIC_SURFACE.toml and the workspace manifest.
+toml = "0.8"

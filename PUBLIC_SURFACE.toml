@@ -1,0 +1,141 @@
+# Публичная поверхность демона (AGPL). Демон линкует libslic3r, поэтому всё,
+# что он отдаёт наружу, лежит в открытом исходнике. Файл меняется только вместе
+# с кодом; PR с правкой этого файла отвечает: «почему это не может жить в
+# воркере геометрии или агенте».
+#
+# Каждая секция сверяется с кодом тестами `crates/slicer-daemon/src/surface_tests.rs`
+# (и `crates/slicer-rpc/tests/method_routing.rs` для методов): расхождение в любую
+# сторону краснит CI. Списки отсортированы по алфавиту (побайтово).
+
+# Локальный крейт = зачем он демону. Ключи совпадают с именами пакетов Cargo.lock
+# без `source` (все пакеты этого репозитория, в `[workspace].members` или нет:
+# path-зависимость внутри каталога workspace становится его членом сама).
+[crates]
+slicer-daemon = "бинарь protype-slicer-daemon и его CLI"
+slicer-ffi = "мост Rust и C++ к libslic3r и OCCT"
+slicer-gcode = "постобработка G-code: слои, выбор слота, возобновление, опережение обдува"
+slicer-geometry = "сборка сетки из CSG-дерева (manifold-rust) для geometry.build"
+slicer-machine = "паспорта принтеров и проверка стартового блока"
+slicer-monitor = "наблюдение за печатью через Moonraker и кадр с камеры"
+slicer-pipeline = "оркестрация нарезки для CLI и slice.estimate поверх slicer-ffi"
+slicer-rpc = "JSON-RPC по WebSocket: диспетчер методов и рукопожатие"
+slicer-scad = "атомарная сборка сетки из параметрического OpenSCAD-источника; библиотека, ничья зависимость, в бинарь демона не линкуется"
+slicer-state = "состояние проекта: события, отмена и возврат, автосохранение"
+slicer-types = "общие типы RPC-параметров и событий и JSON Schema для кодогенерации"
+slicer-verify = "проверки с доказанной способностью краснеть: отверстия, посадки, нависания"
+
+[rpc]
+# Равно `slicer_rpc::methods::METHODS`: ветки `match` в `Dispatcher::handle`.
+methods = [
+    "adaptive.list",
+    "adaptive.remove",
+    "adaptive.set",
+    "events.subscribe",
+    "events.unsubscribe",
+    "gcode.annotate_layers",
+    "gcode.plan_resume",
+    "gcode.select_tool",
+    "geometry.build",
+    "geometry.engrave_serial",
+    "hello",
+    "machine.check_start_block",
+    "machine.list",
+    "machine.passport",
+    "mesh.centre_bore",
+    "mesh.free_circle",
+    "mesh.inscribed",
+    "mesh.measure",
+    "mesh.profile",
+    "mesh.section",
+    "mesh.wall_thickness",
+    "object.add",
+    "object.cut_with_plane",
+    "object.duplicate",
+    "object.get_edit_mesh",
+    "object.get_materialized_mesh",
+    "object.import_local",
+    "object.query_faces",
+    "object.remove",
+    "object.serial_candidates",
+    "object.set_fan_facets",
+    "object.set_filament_facets",
+    "object.set_layer_height_profile",
+    "object.set_layer_ranges",
+    "object.set_operations",
+    "object.set_override",
+    "object.set_seam_facets",
+    "object.set_serial_marking",
+    "object.set_support_facets",
+    "object.split_to_parts",
+    "object.transform",
+    "objects.list",
+    "part.create",
+    "part.create_from_object",
+    "part.get",
+    "part.remove",
+    "part.set_document",
+    "parts.list",
+    "preset.activate",
+    "preset.delete",
+    "preset.list",
+    "preset.save",
+    "project.discard_recovery",
+    "project.export_gcode",
+    "project.new",
+    "project.open",
+    "project.recover",
+    "project.recover_list",
+    "project.redo",
+    "project.save",
+    "project.undo",
+    "setting.get",
+    "setting.list",
+    "setting.set",
+    "settings.schema",
+    "slice.cancel",
+    "slice.estimate",
+    "slice.get_layer_stream",
+    "slice.request",
+    "state.events_since",
+    "state.snapshot",
+    "verify.bore",
+    "verify.fit",
+    "verify.interference",
+    "verify.overhangs",
+    "verify.selftest",
+    "verify.status",
+]
+# Методы, на которые отвечает сам сокет до диспетчера (`server.rs`).
+server_methods = ["goodbye"]
+# Сообщения демона клиенту без запроса.
+notifications = ["events.event"]
+# Равно `slicer_rpc::methods::capabilities()`; в `hello` идут в порядке показа,
+# здесь по алфавиту.
+capabilities = [
+    "events.subscribe",
+    "filament_paint_v1",
+    "gcode.annotate_layers",
+    "geometry.build",
+    "geometry.csg_import_v1",
+    "geometry.engrave_serial",
+    "geometry.surface_relief_v1",
+    "machine.passport",
+    "mesh.measure",
+    "mesh_inspector",
+    "object.cut_with_plane",
+    "object.set_operations.hole_heads",
+    "part_document",
+    "preset.activate",
+    "project.new",
+    "serial_marking_column_v1",
+    "serial_marking_short_v1",
+    "serial_marking_v1",
+    "slice.calibration_test",
+    "slice.calibration_test.retraction_steps",
+    "slice.estimate",
+    "verify.selftest",
+]
+
+[cli]
+# Подкоманды `protype-slicer-daemon`, по именам clap.
+subcommands = ["build-geometry", "camera", "schema", "serve", "slice", "watch"]

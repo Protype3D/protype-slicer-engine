@@ -1,0 +1,21 @@
+[package]
+name = "slicer-monitor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# The HTTP transport. Off by default so the decision logic — which is
+# where every subtlety lives — builds and tests with no network stack at
+# all, and so a machine without a printer runs the real tests rather than
+# skipping them.
+moonraker = ["dep:hyper", "dep:hyper-util", "dep:http-body-util", "dep:tokio"]
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+hyper = { workspace = true, optional = true }
+hyper-util = { workspace = true, optional = true }
+http-body-util = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }

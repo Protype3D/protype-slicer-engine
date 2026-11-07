@@ -1,0 +1,20 @@
+[package]
+name = "slicer-scad"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# Integration tests that actually run the `openscad` binary. Off by
+# default and named the same way `with-libslic3r` is, so a machine
+# without OpenSCAD reports "not run" rather than a green tick from a
+# silently skipped test.
+with-openscad = []
+
+[dependencies]
+slicer-geometry = { path = "../slicer-geometry" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }

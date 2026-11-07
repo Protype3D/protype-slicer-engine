@@ -1,0 +1,38 @@
+[package]
+name = "slicer-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# `cxx` provides the Rust ↔ C++ bridge. The C++ side currently ships a
+# stub (cpp/protype_slicer_bridge.cpp) that produces deterministic
+# rectangle G-code mirroring the old Rust fake_slice. Once libslic3r
+# integration lands behind the `with-libslic3r` feature, the same
+# bridge interface delegates to libslic3r — no daemon-side changes
+# required.
+
+[features]
+default = []
+build-fixtures = []
+# Pulls in slicer-geometry for the `CsgNode` type the B-rep evaluator
+# shares with the mesh kernel. Optional so the stub build stays free of
+# manifold: the two kernels take the same tree, but only one of them
+# needs OCCT linked.
+with-libslic3r = ["dep:slicer-geometry"]
+
+[dependencies]
+cxx = { workspace = true }
+serde = { workspace = true }
+slicer-geometry = { path = "../slicer-geometry", optional = true }
+
+[dev-dependencies]
+sha2 = { workspace = true }
+serde_json = { workspace = true }
+
+[build-dependencies]
+cxx-build = { workspace = true }
+
+[[bin]]
+name = "build_idex_fixtures"
+path = "../../tests/fixtures/idex/build_fixtures.rs"
+required-features = ["build-fixtures"]

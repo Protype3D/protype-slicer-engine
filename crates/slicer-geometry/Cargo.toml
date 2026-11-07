@@ -1,0 +1,16 @@
+[package]
+name = "slicer-geometry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Deliberately depends on nothing else in this workspace. Adding
+# slicer-ffi (or anything that reaches libslic3r) drops this crate out of
+# the per-PR CI matrix, which is the reason manifold was chosen over the
+# in-tree C++ engines in the first place. See
+# Slicer/docs/superpowers/specs/2026-08-05-cad-geometry-kernel-decision.md §7.
+[dependencies]
+manifold-rust = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }

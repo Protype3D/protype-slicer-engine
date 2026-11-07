@@ -1,0 +1,20 @@
+diff --git a/src/libslic3r/PrintConfig.cpp b/src/libslic3r/PrintConfig.cpp
+index 498678ad29..4f9439b4a4 100644
+--- a/src/libslic3r/PrintConfig.cpp
++++ b/src/libslic3r/PrintConfig.cpp
+@@ -7591,8 +7591,13 @@ std::map<std::string, std::string> validate(const FullPrintConfig &cfg, bool und
+ #define PRINT_CONFIG_CACHE_INITIALIZE(CLASSES_SEQ) \
+     BOOST_PP_SEQ_FOR_EACH(PRINT_CONFIG_CACHE_ELEMENT_DEFINITION, _, BOOST_PP_TUPLE_TO_SEQ(CLASSES_SEQ)) \
+     int print_config_static_initializer() { \
+-        /* Putting a trace here to avoid the compiler to optimize out this function. */ \
+-        BOOST_LOG_TRIVIAL(trace) << "Initializing StaticPrintConfigs"; \
++        /* Original upstream logged a BOOST_LOG_TRIVIAL(trace) here as a no-op-prevention */ \
++        /* anchor. Removed in protype-slicer-daemon: the trace fires from a TU whose */ \
++        /* static init runs *before* utils.cpp installs the `severity >= warning` filter, */ \
++        /* and boost.log's implicit default sink writes to std::cout — which corrupts */ \
++        /* the `daemon schema` JSON payload that codegen.ts parses. The cache-init calls */ \
++        /* below already have observable side effects (StaticCache mutations) so the */ \
++        /* compiler can't elide them. */ \
+         BOOST_PP_SEQ_FOR_EACH(PRINT_CONFIG_CACHE_ELEMENT_INITIALIZATION, _, BOOST_PP_TUPLE_TO_SEQ(CLASSES_SEQ)) \
+         return 1; \
+     }

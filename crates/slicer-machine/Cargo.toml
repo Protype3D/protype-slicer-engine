@@ -1,0 +1,15 @@
+[package]
+name = "slicer-machine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Deliberately depends on nothing else in this workspace, for the same
+# reason `slicer-geometry` does: a machine passport is pure data plus the
+# arithmetic that checks it, so this crate stays in the per-PR CI matrix
+# that runs without libslic3r. Anything here that starts needing the
+# slicer belongs on the other side of an interface, not in this manifest.
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }

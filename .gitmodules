@@ -1,0 +1,3 @@
+[submodule "upstream/libslic3r"]
+	path = upstream/libslic3r
+	url = https://github.com/dinamicby/OrcaSlicer.git

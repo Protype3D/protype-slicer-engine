@@ -1,0 +1,14 @@
+[package]
+name = "slicer-gcode"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Post-processing is a transformation *of* G-code that consults the
+# machine passport; it takes no dependency on the slicer itself, so it
+# stays in the per-PR CI matrix alongside slicer-machine.
+[dependencies]
+slicer-machine = { path = "../slicer-machine" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }

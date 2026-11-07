@@ -1,0 +1,66 @@
+Protype Slicer engine source
+============================
+
+This tree is the source of the Protype Slicer engine: the program
+protype-slicer-daemon and the Rust crates in crates/. The exact revision is in
+the file REVISION; the source of a release is the tag slicer-vX.Y.Z of
+https://github.com/dinamicby/protype-slicer-engine.
+
+
+The engine
+----------
+
+The engine itself is free software under the GNU Affero General Public License,
+version 3 or (at your option) any later version (AGPL-3.0-or-later). The full
+text is in the file LICENSE.
+
+
+Components the engine is built with
+-----------------------------------
+
+libslic3r (the Git submodule upstream/libslic3r, taken from the fork
+https://github.com/dinamicby/OrcaSlicer)
+    OrcaSlicer's slicing library, which descends from Bambu Studio, PrusaSlicer
+    and Slic3r. License: GNU AGPL, version 3 (AGPL-3.0). The text is in
+    upstream/libslic3r/LICENSE.txt. The commit built against is the libslic3r
+    hash in REVISION.
+
+OpenCASCADE Technology (OCCT), version 7.6.0
+    Built from the source that upstream/libslic3r/deps downloads and linked into
+    the engine: statically on macOS, as the shared libraries TK*.dll on Windows.
+    License: GNU Lesser General Public License, version 2.1, with the Open
+    CASCADE exception. https://dev.opencascade.org
+
+MCUT (upstream/libslic3r/deps_src/mcut)
+    Mesh cutting library, used by libslic3r. MCUT is offered under two mutually
+    exclusive licenses; the engine uses it under option (A), the GNU General
+    Public License, version 3 (GPL-3.0). See
+    upstream/libslic3r/deps_src/mcut/LICENSE.txt and LICENSE.GPL.txt.
+
+manifold-rust 0.10, a Rust port of the Manifold geometry library
+    Cargo dependency of the engine (crates/slicer-geometry). License: Apache
+    License, version 2.0. https://github.com/larsbrubaker/manifold-rust
+
+Other libraries
+    libslic3r is built from, and with, further libraries: those in
+    upstream/libslic3r/deps_src, and those that upstream/libslic3r/deps
+    downloads and builds (for example Boost, oneTBB, OpenVDB, NLopt, Qhull,
+    OpenSSL and zlib). Each one is under its own license, which comes with its
+    source; the licenses of the Rust crates the engine depends on are listed
+    by the crates themselves and fixed by Cargo.lock.
+
+
+Bundled presets
+---------------
+
+profiles/ holds presets merged from OrcaSlicer vendor profiles. Their origin
+and terms are in profiles/LICENSE.md.
+
+
+Trademarks
+----------
+
+"Protype" and the Protype logo are trademarks of Protype. Under section 7(e) of
+the GNU AGPL, this license grants no rights to use them: a modified version you
+distribute has to carry a name of its own and must not be presented as Protype
+Slicer.

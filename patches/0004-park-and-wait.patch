@@ -1,0 +1,1813 @@
+diff --git a/src/libslic3r/GCode.cpp b/src/libslic3r/GCode.cpp
+index dda1d0c5ed..3c194c1662 100644
+--- a/src/libslic3r/GCode.cpp
++++ b/src/libslic3r/GCode.cpp
+@@ -9,6 +9,7 @@
+ #include "ExtrusionEntity.hpp"
+ #include "EdgeGrid.hpp"
+ #include "Geometry/ConvexHull.hpp"
++#include "GCode/CoolingBuffer.hpp"
+ #include "GCode/PrintExtents.hpp"
+ #include "GCode/Thumbnails.hpp"
+ #include "GCode/WipeTower.hpp"
+@@ -26,7 +27,9 @@
+ #include <cstdlib>
+ #include <chrono>
+ #include <iostream>
++#include <limits>
+ #include <math.h>
++#include <optional>
+ #include <stdlib.h>
+ #include <string>
+ #include <utility>
+@@ -1798,6 +1801,79 @@ std::vector<const PrintInstance*> sort_object_instances_by_model_order(const Pri
+     return instances;
+ }
+ 
++// Pick a park point inside the given infill polygons, closest to last_pos,
++// pushed inward from polygon boundary by nozzle_diameter and clamped to bed
++// minus a 5mm margin. Returns nullopt if polygons are empty.
++std::optional<Vec2f> compute_park_point_from_polygons(
++    const Polygons&       infill,
++    const Vec2f&          last_pos,
++    float                 nozzle_diameter,
++    const BoundingBoxf&   bed_bbox)
++{
++    if (infill.empty())
++        return std::nullopt;
++
++    // Polygons are in scaled (long) coordinates; last_pos / bed_bbox are mm.
++    const Point last_scaled = Point::new_scale(last_pos.x(), last_pos.y());
++
++    Vec2f  best{0.f, 0.f};
++    double best_d2 = std::numeric_limits<double>::infinity();
++
++    for (const Polygon& poly : infill) {
++        if (poly.points.size() < 3)
++            continue;
++
++        // Nearest point on this polygon's perimeter to the current nozzle pos.
++        const Point proj      = poly.point_projection(last_scaled);
++        const bool  is_inside = poly.contains(last_scaled);
++
++        // If we're already inside the infill, the current position is the
++        // closest valid interior point; otherwise step inward from the
++        // boundary by nozzle_diameter so the parked nozzle sits safely
++        // inside the infill region.
++        Vec2d candidate_mm;
++        if (is_inside) {
++            candidate_mm = Vec2d(double(last_pos.x()), double(last_pos.y()));
++        } else {
++            const Vec2d proj_mm(unscale<double>(proj.x()), unscale<double>(proj.y()));
++            const Vec2d out_mm(double(last_pos.x()) - proj_mm.x(),
++                               double(last_pos.y()) - proj_mm.y());
++            const double n = out_mm.norm();
++            if (n > 1e-6) {
++                // Unit vector from proj toward last_pos points OUT of polygon;
++                // negate it to step INTO the polygon by nozzle_diameter.
++                const Vec2d inward = (-out_mm / n) * double(nozzle_diameter);
++                candidate_mm = proj_mm + inward;
++            } else {
++                candidate_mm = proj_mm;
++            }
++        }
++
++        const Vec2f candidate_f(float(candidate_mm.x()), float(candidate_mm.y()));
++        const double dx = double(candidate_f.x()) - double(last_pos.x());
++        const double dy = double(candidate_f.y()) - double(last_pos.y());
++        const double d2 = dx * dx + dy * dy;
++        if (d2 < best_d2) {
++            best_d2 = d2;
++            best    = candidate_f;
++        }
++    }
++
++    if (! std::isfinite(best_d2))
++        return std::nullopt;
++
++    // Clamp to bed bbox minus a fixed 5 mm margin so the parked nozzle never
++    // ends up outside the printable area.
++    constexpr float margin = 5.f;
++    const float min_x = float(bed_bbox.min.x()) + margin;
++    const float max_x = float(bed_bbox.max.x()) - margin;
++    const float min_y = float(bed_bbox.min.y()) + margin;
++    const float max_y = float(bed_bbox.max.y()) - margin;
++    best.x() = std::clamp(best.x(), min_x, max_x);
++    best.y() = std::clamp(best.y(), min_y, max_y);
++    return best;
++}
++
+ enum BambuBedType {
+     bbtUnknown = 0,
+     bbtCoolPlate = 1,
+@@ -4482,6 +4558,90 @@ LayerResult GCode::process_layer(
+         }
+     }
+ 
++    // Park-and-wait: emit one PARK_HINT comment per extruder configured with
++    // strategy=park_and_wait so the CoolingBuffer pass can rewrite a slow
++    // layer into a real park + dwell instead of a feedrate scale-down.
++    // Skip on the first layer because adhesion is too sensitive to pause.
++    //
++    // Frame-of-reference note: the hint XY must be in G-code (bed) frame
++    // because CoolingBuffer emits it verbatim as a `G0 X Y` move alongside
++    // ordinary extrusion moves that are already bed-frame. We therefore
++    // translate the object-local infill polygons and the writer's last
++    // position into bed frame via point_to_gcode-equivalent (+m_origin
++    // -extruder_offset) before running the park-point search, and clamp
++    // against the bed bbox (also bed frame).
++    if (object_layer != nullptr && object_layer->id() > 0) {
++        BoundingBoxf bed_bbox(print.config().printable_area.values);
++        for (unsigned int extruder_id : layer_tools.extruders) {
++            const int strat = m_config.min_layer_time_strategy.get_at(extruder_id);
++
++            if (strat == static_cast<int>(mltsParkAndWait)) {
++                // Object -> bed translation in scaled units, matching
++                // point_to_gcode(): unscale(p) + m_origin - extruder_offset.
++                const Vec2d ext_off = m_config.extruder_offset.get_at(extruder_id);
++                const Point obj_to_bed(
++                    scale_(m_origin.x() - ext_off.x()),
++                    scale_(m_origin.y() - ext_off.y()));
++
++                // Collect infill surfaces (internal sparse + internal solid + bridge)
++                // across all regions in the current object_layer, then translate
++                // each polygon from object-local into bed frame.
++                Polygons infill;
++                for (const LayerRegion* lr : object_layer->regions()) {
++                    for (const Surface& s : lr->fill_surfaces.surfaces) {
++                        if (s.is_internal() || s.is_solid_infill() || s.is_bridge())
++                            polygons_append(infill, to_polygons(s.expolygon));
++                    }
++                }
++                for (Polygon& p : infill)
++                    p.translate(obj_to_bed);
++
++                // Current nozzle XY in bed-frame mm. We replicate the
++                // point_to_gcode() math here (rather than calling it) so the
++                // extruder_offset matches `extruder_id`, which need not be the
++                // writer's currently-active extruder.
++                const Vec2d last_bed =
++                    unscale(m_last_pos) + m_origin - ext_off;
++                const Vec2f last_mm(float(last_bed.x()), float(last_bed.y()));
++                const float nozzle_d = float(m_config.nozzle_diameter.get_at(extruder_id));
++
++                auto park = compute_park_point_from_polygons(infill, last_mm, nozzle_d, bed_bbox);
++                const Vec2f hint = park.value_or(last_mm);
++
++                char hint_buf[96];
++                snprintf(hint_buf, sizeof(hint_buf),
++                         "; PARK_HINT extruder=%u x=%.3f y=%.3f strategy=park_and_wait\n",
++                         extruder_id, hint.x(), hint.y());
++                gcode += hint_buf;
++
++            } else if (strat == static_cast<int>(mltsCoolingTower)) {
++                // Cooling-tower XY is constant for the whole print. Either
++                // user-pinned via cooling_tower_position, or auto-placed at
++                // the bed's right-front corner (offset by tower radius + margin).
++                // TODO(cooling-tower V2): replace the corner fallback with a
++                // model-bbox-aware placement once we plumb the whole-print bbox
++                // through Print:: into here (compute_cooling_tower_xy already
++                // exists and is unit-tested for this).
++                Vec2f tower_xy;
++                if (! m_config.cooling_tower_position.values.empty()) {
++                    const Vec2d &p = m_config.cooling_tower_position.values.front();
++                    tower_xy = Vec2f(float(p.x()), float(p.y()));
++                } else {
++                    const float half = float(m_config.cooling_tower_diameter.value) * 0.5f + 3.f;
++                    tower_xy = Vec2f(
++                        float(bed_bbox.max.x()) - half,
++                        float(bed_bbox.min.y()) + half);
++                }
++
++                char hint_buf[96];
++                snprintf(hint_buf, sizeof(hint_buf),
++                         "; PARK_HINT extruder=%u x=%.3f y=%.3f strategy=cooling_tower\n",
++                         extruder_id, tower_xy.x(), tower_xy.y());
++                gcode += hint_buf;
++            }
++        }
++    }
++
+     result.gcode = std::move(gcode);
+     result.cooling_buffer_flush = object_layer || raft_layer || last_layer;
+     return result;
+diff --git a/src/libslic3r/GCode.hpp b/src/libslic3r/GCode.hpp
+index f3ce7aaf74..d9b94c9f64 100644
+--- a/src/libslic3r/GCode.hpp
++++ b/src/libslic3r/GCode.hpp
+@@ -2,6 +2,7 @@
+ #define slic3r_GCode_hpp_
+ 
+ #include "libslic3r.h"
++#include "BoundingBox.hpp"
+ #include "ExPolygon.hpp"
+ #include "GCodeWriter.hpp"
+ #include "Layer.hpp"
+@@ -29,6 +30,7 @@
+ 
+ #include <memory>
+ #include <map>
++#include <optional>
+ #include <set>
+ #include <string>
+ #include <cfloat>
+@@ -639,6 +641,15 @@ private:
+ 
+ std::vector<const PrintInstance*> sort_object_instances_by_model_order(const Print& print, bool init_order = false);
+ 
++// Pick a park point inside the given infill polygons, closest to last_pos,
++// pushed inward from polygon boundary by nozzle_diameter and clamped to bed
++// minus a 5mm margin. Returns nullopt if polygons are empty.
++std::optional<Vec2f> compute_park_point_from_polygons(
++    const Polygons&       infill,
++    const Vec2f&          last_pos,
++    float                 nozzle_diameter,
++    const BoundingBoxf&   bed_bbox);
++
+ }
+ 
+ #endif
+diff --git a/src/libslic3r/GCode/CoolingBuffer.cpp b/src/libslic3r/GCode/CoolingBuffer.cpp
+index 9541d68034..a276177484 100644
+--- a/src/libslic3r/GCode/CoolingBuffer.cpp
++++ b/src/libslic3r/GCode/CoolingBuffer.cpp
+@@ -1,10 +1,16 @@
+ #include "../GCode.hpp"
+ #include "CoolingBuffer.hpp"
++#include <algorithm>
+ #include <boost/algorithm/string/predicate.hpp>
+ #include <boost/algorithm/string/replace.hpp>
+ #include <boost/log/trivial.hpp>
++#include <cmath>
++#include <cstdio>
++#include <iomanip>
+ #include <iostream>
+ #include <float.h>
++#include <sstream>
++#include <string_view>
+ #include <system_error>
+ #include <unordered_map>
+ 
+@@ -18,6 +24,344 @@
+ 
+ namespace Slic3r {
+ 
++// Parse a single "; PARK_HINT extruder=N x=X y=Y strategy=..." comment line
++// emitted by GCode::process_layer(). Returns nullopt for any non-PARK_HINT
++// input or malformed line. Tolerates an optional trailing newline so callers
++// can pass either pre-trimmed or raw lines.
++std::optional<ParkHintData> parse_park_hint_line(const std::string &line)
++{
++    static const char PREFIX[] = "; PARK_HINT";
++    if (line.compare(0, sizeof(PREFIX) - 1, PREFIX) != 0)
++        return std::nullopt;
++
++    unsigned int ext_id = 0;
++    float px = 0.f, py = 0.f;
++    char strat[32] = {0};
++    // sscanf with %31s stops at whitespace, so a trailing '\n' is fine.
++    if (std::sscanf(line.c_str(),
++                    "; PARK_HINT extruder=%u x=%f y=%f strategy=%31s",
++                    &ext_id, &px, &py, strat) != 4)
++        return std::nullopt;
++
++    ParkHintData out;
++    out.extruder_id      = ext_id;
++    out.point            = Vec2f(px, py);
++    const std::string_view sv(strat);
++    out.is_park_and_wait = (sv == "park_and_wait");
++    out.is_cooling_tower = (sv == "cooling_tower");
++    return out;
++}
++
++// Compute the wait needed to extend a park-and-wait layer to its minimum
++// layer-time threshold, after subtracting fixed travel/retract/z-hop overhead.
++// Speeds in mm/s; distances in mm; times in s. Returns 0 when already above
++// threshold, when no park_point is available, or when overhead alone closes
++// the gap (no pause necessary at the park point).
++float compute_park_pause_needed(
++    float threshold,
++    float layer_time,
++    std::optional<Vec2f> park_point,
++    Vec2f current_xy,
++    float park_retract_length,
++    float park_z_hop,
++    float travel_speed,
++    float travel_speed_z,
++    float retract_speed)
++{
++    if (layer_time >= threshold) return 0.f;
++    if (! park_point.has_value()) return 0.f;
++
++    // Round-trip distance for each motion (go to park + return).
++    const float dist_to_park = (current_xy - *park_point).norm();
++    const float ts  = std::max(1.f, travel_speed);
++    const float tsz = std::max(1.f, travel_speed_z > 0.f ? travel_speed_z : travel_speed);
++    const float rs  = std::max(1.f, retract_speed);
++
++    const float travel_t  = 2.f * dist_to_park       / ts;
++    const float retract_t = 2.f * park_retract_length / rs;
++    const float zhop_t    = 2.f * park_z_hop          / tsz;
++
++    return std::max(0.f, threshold - layer_time - travel_t - retract_t - zhop_t);
++}
++
++// Format the per-layer park-and-wait gcode sequence (retract, Z-hop, travel,
++// G4 dwell(s), Z-return, unretract) and append to `out`. The pause is split
++// into <=60s G4 chunks so we don't trip firmware that caps G4 P. Z-invariant:
++// the second G1 Z restores the original cur_z BEFORE the unretract, so any
++// ooze drips inside the parked-on infill, not on the next layer.
++void emit_park_sequence(const ParkSequenceInputs &in, std::string &out)
++{
++    const float travel_mm_min  = in.travel_speed * 60.f;
++    const float z_mm_min       = (in.travel_speed_z > 0.f
++                                  ? in.travel_speed_z
++                                  : in.travel_speed) * 60.f;
++    const float retract_mm_min = in.retract_speed * 60.f;
++    const int   pause_ms       = int(in.pause_needed * 1000.f);
++    const float park_z         = in.cur_z + in.park_z_hop;
++
++    std::ostringstream s;
++    s << "; PARK_AND_WAIT layer_id=" << in.layer_id
++      << " pause=" << std::fixed << std::setprecision(2) << in.pause_needed << "s"
++      << " park=(" << in.park_point.x() << "," << in.park_point.y() << ")"
++      << " z_hop=" << in.park_z_hop << "\n";
++    // Force absolute E inside the block so that `G92 E0` ... `G1 E0` round-trips
++    // the retract correctly. Without this, a relative-E surrounding profile
++    // turns the closing `G1 E0` into a no-op and the filament stays retracted
++    // by `park_retract_length`, starving the next layer's first extrusion.
++    if (in.use_relative_e_distances) s << "M82\n";
++    s << "G92 E0\n"
++      << "G1 E-" << in.park_retract_length << " F" << int(retract_mm_min) << "\n"
++      << "G1 Z" << park_z << " F" << int(z_mm_min) << "\n"
++      << "G0 X" << in.park_point.x() << " Y" << in.park_point.y()
++        << " F" << int(travel_mm_min) << "\n";
++
++    // Split G4 into 60s chunks (firmware-portable; some firmwares cap G4 P).
++    int remaining = pause_ms;
++    while (remaining > 0) {
++        int chunk = std::min(remaining, 60000);
++        s << "G4 P" << chunk << "\n";
++        remaining -= chunk;
++    }
++
++    s << "G1 Z" << in.cur_z << " F" << int(z_mm_min) << "\n"
++      << "G1 E0 F" << int(retract_mm_min) << "\n";
++    if (in.use_relative_e_distances) s << "M83\n";
++    s << "; END_PARK_AND_WAIT\n";
++
++    out += s.str();
++}
++
++// Format the cooling-tower visit block: retract, lift to safe Z, travel to
++// tower XY, drop to the spiral start Z (= prev_tower_top + one layer height),
++// unretract, then extrude a continuous spiral of `pause_needed * tower_speed`
++// mm of arc (segmented at 20 polylines per loop). The block ends by lifting
++// back to safe Z, dropping to model cur_z, and retracting for the trip back
++// to the model (the caller emits the return travel). Returns the new
++// tower_top_z so the caller can carry it forward to the next layer's visit.
++//
++// Same E-mode contract as emit_park_sequence: wrapped in M82/M83 when the
++// surrounding profile uses relative E, so the symmetric `G92 E0 ... G1 E0`
++// round-trip resolves correctly.
++float emit_cooling_tower_visit(const CoolingTowerVisitInputs &in, std::string &out)
++{
++    constexpr float PI_F = 3.14159265358979323846f;
++
++    const float travel_mm_min  = in.travel_speed * 60.f;
++    const float z_mm_min       = (in.travel_speed_z > 0.f
++                                  ? in.travel_speed_z
++                                  : in.travel_speed) * 60.f;
++    const float tower_mm_min   = in.tower_speed * 60.f;
++    const float retract_mm_min = in.retract_speed * 60.f;
++
++    const float radius        = in.diameter * 0.5f;
++    const float circumference = PI_F * in.diameter;
++    // Simple rectangular-bead E-per-mm (same approximation libslic3r uses
++    // for spiral_mode; rounded-corner correction is < 5% for typical
++    // 0.42mm/0.2mm beads and not worth complicating the math here).
++    const float filament_xs   = (PI_F * 0.25f) * in.filament_diameter * in.filament_diameter;
++    const float bead_xs       = in.tower_line_width * in.tower_layer_height;
++    const float e_per_mm      = bead_xs / filament_xs;
++
++    // Spiral starts one tower_layer_height above the previous top so the
++    // first ring of this visit lays cleanly on the previous top ring.
++    const float z_start       = in.prev_tower_top_z + in.tower_layer_height;
++    // Safe travel Z must clear BOTH the model's cur_z and the tower's
++    // z_start so we never crash on either while traversing.
++    const float safe_z        = std::max(in.cur_z, z_start) + in.z_hop;
++
++    // 20 segments per loop = 18° step. Enough for smooth curve, cheap on
++    // gcode size at hundreds of visits per print.
++    static constexpr int SEGMENTS_PER_LOOP = 20;
++    const float seg_arc       = circumference / float(SEGMENTS_PER_LOOP);
++    const float target_arc    = in.tower_speed * in.pause_needed;
++    const int   nseg          = std::max(1, int(std::round(target_arc / seg_arc)));
++    const float actual_arc    = float(nseg) * seg_arc;
++    const float tower_top_z   = z_start + (actual_arc / circumference) * in.tower_layer_height;
++
++    std::ostringstream s;
++    s.setf(std::ios::fixed);
++    s << "; COOLING_TOWER_VISIT layer_id=" << in.layer_id
++      << std::setprecision(2)
++      << " pause=" << in.pause_needed << "s"
++      << " xy=(" << in.tower_xy.x() << "," << in.tower_xy.y() << ")"
++      << " arc=" << actual_arc << "mm"
++      << " z_start=" << z_start << " z_top=" << tower_top_z
++      << "\n";
++
++    if (in.use_relative_e_distances) s << "M82\n";
++    s << "G92 E0\n"
++      << "G1 E-" << std::setprecision(2) << in.retract_length << " F" << int(retract_mm_min) << "\n"
++      << "G1 Z" << safe_z << " F" << int(z_mm_min) << "\n"
++      << "G0 X" << std::setprecision(2) << in.tower_xy.x()
++              << " Y" << in.tower_xy.y()
++              << " F" << int(travel_mm_min) << "\n"
++      << "G1 Z" << std::setprecision(2) << z_start << " F" << int(z_mm_min) << "\n"
++      << "G1 E0 F" << int(retract_mm_min) << "\n";
++
++    float accumulated_e   = 0.f;
++    float accumulated_arc = 0.f;
++    for (int i = 1; i <= nseg; ++i) {
++        const float theta  = 2.f * PI_F * (float(i) / float(SEGMENTS_PER_LOOP));
++        const float x      = in.tower_xy.x() + radius * std::cos(theta);
++        const float y      = in.tower_xy.y() + radius * std::sin(theta);
++        accumulated_arc   += seg_arc;
++        const float z      = z_start + (accumulated_arc / circumference) * in.tower_layer_height;
++        accumulated_e     += seg_arc * e_per_mm;
++        s << "G1 X" << std::setprecision(3) << x
++                  << " Y" << y
++                  << " Z" << z
++                  << " E" << accumulated_e
++                  << " F" << int(tower_mm_min) << "\n";
++    }
++
++    // Lift to safe Z, return-travel to model XY is the caller's responsibility,
++    // then drop to cur_z and retract for the trip out.
++    s << "G1 Z" << std::setprecision(2) << safe_z << " F" << int(z_mm_min) << "\n"
++      << "G1 Z" << std::setprecision(2) << in.cur_z << " F" << int(z_mm_min) << "\n"
++      << "G1 E0 F" << int(retract_mm_min) << "\n";
++    if (in.use_relative_e_distances) s << "M83\n";
++    s << "; END_COOLING_TOWER_VISIT\n";
++
++    out += s.str();
++    return tower_top_z;
++}
++
++// Lay a first-layer brim under the cooling tower: N concentric closed loops,
++// each at z = first_layer_z, with the innermost ring at radius =
++// tower_diameter/2 + line_width/2 (so it doesn't overlap the spiral wall
++// above), and each subsequent ring offset outward by `line_width`. One
++// continuous polyline per loop (closed). Sets the tower base — the first
++// emit_cooling_tower_visit call after this will start its spiral at
++// first_layer_z + tower_layer_height. M82/M83-wrapped when relative-E.
++void emit_cooling_tower_brim(const CoolingTowerBrimInputs &in, std::string &out)
++{
++    if (in.loops <= 0) return;
++
++    constexpr float PI_F = 3.14159265358979323846f;
++    constexpr int   SEGMENTS_PER_LOOP = 20;
++
++    const float travel_mm_min  = in.travel_speed * 60.f;
++    const float z_mm_min       = (in.travel_speed_z > 0.f
++                                  ? in.travel_speed_z
++                                  : in.travel_speed) * 60.f;
++    const float brim_mm_min    = in.speed * 60.f;
++    const float retract_mm_min = in.retract_speed * 60.f;
++
++    const float filament_xs = (PI_F * 0.25f) * in.filament_diameter * in.filament_diameter;
++    const float bead_xs     = in.line_width * in.first_layer_z;
++    const float e_per_mm    = bead_xs / filament_xs;
++
++    const float safe_z      = in.first_layer_z + 0.4f;   // small lift before travel
++
++    std::ostringstream s;
++    s.setf(std::ios::fixed);
++    s << "; COOLING_TOWER_BRIM xy=(" << std::setprecision(2)
++      << in.tower_xy.x() << "," << in.tower_xy.y() << ")"
++      << " loops=" << in.loops
++      << " z=" << in.first_layer_z << "\n";
++
++    if (in.use_relative_e_distances) s << "M82\n";
++    s << "G92 E0\n"
++      << "G1 E-" << std::setprecision(2) << in.retract_length << " F" << int(retract_mm_min) << "\n"
++      << "G1 Z" << safe_z << " F" << int(z_mm_min) << "\n"
++      << "G0 X" << std::setprecision(2) << in.tower_xy.x()
++              << " Y" << in.tower_xy.y()
++              << " F" << int(travel_mm_min) << "\n"
++      << "G1 Z" << std::setprecision(2) << in.first_layer_z << " F" << int(z_mm_min) << "\n"
++      << "G1 E0 F" << int(retract_mm_min) << "\n";
++
++    float accumulated_e = 0.f;
++    for (int loop = 0; loop < in.loops; ++loop) {
++        // Innermost loop sits just outside the spiral wall: r0 = D/2 + W/2.
++        // Each further loop is W outward.
++        const float r = in.tower_diameter * 0.5f
++                        + in.line_width * 0.5f
++                        + float(loop) * in.line_width;
++        // Approach the start of this loop (theta = 0 -> +x of center).
++        const float x0 = in.tower_xy.x() + r;
++        const float y0 = in.tower_xy.y();
++        s << "G0 X" << std::setprecision(3) << x0
++                  << " Y" << y0
++                  << " F" << int(travel_mm_min) << "\n";
++        // Emit the closed loop (20 segments + 1 closing segment back to start).
++        for (int i = 1; i <= SEGMENTS_PER_LOOP; ++i) {
++            const float theta = 2.f * PI_F * (float(i) / float(SEGMENTS_PER_LOOP));
++            const float x     = in.tower_xy.x() + r * std::cos(theta);
++            const float y     = in.tower_xy.y() + r * std::sin(theta);
++            const float seg   = 2.f * PI_F * r / float(SEGMENTS_PER_LOOP);
++            accumulated_e    += seg * e_per_mm;
++            s << "G1 X" << std::setprecision(3) << x
++                      << " Y" << y
++                      << " E" << accumulated_e
++                      << " F" << int(brim_mm_min) << "\n";
++        }
++    }
++
++    s << "G1 Z" << std::setprecision(2) << safe_z << " F" << int(z_mm_min) << "\n"
++      << "G1 E0 F" << int(retract_mm_min) << "\n";
++    if (in.use_relative_e_distances) s << "M83\n";
++    s << "; END_COOLING_TOWER_BRIM\n";
++
++    out += s.str();
++}
++
++// Pick an XY for the cooling tower next to the model. Tries — in order —
++// right, left, back, front of the model bbox; falls back to the first bed
++// corner that fits. Result is guaranteed inside `bed` (clamped after each
++// candidate). margin is the gap between the tower's bounding circle and
++// the model bbox edge.
++Vec2f compute_cooling_tower_xy(
++    const BoundingBoxf &model_bbox,
++    const BoundingBoxf &bed,
++    float diameter,
++    float margin)
++{
++    const float half = diameter * 0.5f + margin;
++    const float cy   = float((model_bbox.min.y() + model_bbox.max.y()) * 0.5);
++    const float cx   = float((model_bbox.min.x() + model_bbox.max.x()) * 0.5);
++
++    auto inside_bed = [&](float x, float y) {
++        return x - half >= bed.min.x() && x + half <= bed.max.x()
++            && y - half >= bed.min.y() && y + half <= bed.max.y();
++    };
++
++    // 1. Right of model.
++    {
++        const float x = float(model_bbox.max.x()) + half;
++        if (inside_bed(x, cy)) return Vec2f(x, cy);
++    }
++    // 2. Left of model.
++    {
++        const float x = float(model_bbox.min.x()) - half;
++        if (inside_bed(x, cy)) return Vec2f(x, cy);
++    }
++    // 3. Back of model.
++    {
++        const float y = float(model_bbox.max.y()) + half;
++        if (inside_bed(cx, y)) return Vec2f(cx, y);
++    }
++    // 4. Front of model.
++    {
++        const float y = float(model_bbox.min.y()) - half;
++        if (inside_bed(cx, y)) return Vec2f(cx, y);
++    }
++    // 5. Bed corners (front-left, front-right, back-left, back-right).
++    const Vec2f corners[4] = {
++        Vec2f(float(bed.min.x()) + half, float(bed.min.y()) + half),
++        Vec2f(float(bed.max.x()) - half, float(bed.min.y()) + half),
++        Vec2f(float(bed.min.x()) + half, float(bed.max.y()) - half),
++        Vec2f(float(bed.max.x()) - half, float(bed.max.y()) - half),
++    };
++    for (const Vec2f &p : corners)
++        if (inside_bed(p.x(), p.y())) return p;
++
++    // Last resort: bed center, clamped — caller must accept that this may
++    // overlap the model. Better than returning out-of-bed coordinates.
++    return Vec2f(
++        std::min(std::max(cx, float(bed.min.x()) + half), float(bed.max.x()) - half),
++        std::min(std::max(cy, float(bed.min.y()) + half), float(bed.max.y()) - half));
++}
++
+ CoolingBuffer::CoolingBuffer(GCode &gcodegen) : m_config(gcodegen.config()), m_toolchange_prefix(gcodegen.writer().toolchange_prefix()), m_current_extruder(0)
+ {
+     this->reset(gcodegen.writer().get_position());
+@@ -41,6 +385,10 @@ void CoolingBuffer::reset(const Vec3d &position)
+     m_fan_speed = -1;
+     m_additional_fan_speed = -1;
+     m_current_fan_speed = -1;
++    // Cooling tower state is per-print; clear it so a new print starts with
++    // a fresh tower at Z=0 with no brim emitted yet.
++    m_cooling_tower_top_z = 0.f;
++    m_cooling_tower_brim_emitted = false;
+ }
+ 
+ struct CoolingLine
+@@ -236,6 +584,16 @@ struct PerExtruderAdjustments
+     
+     bool                        dont_slow_down_outer_wall = false;
+ 
++    // Cooling strategy state (populated from PARK_HINT comment if present).
++    // CoolingTower behaves identically to ParkAndWait for the pause computation
++    // (both incur the same round-trip overhead), differing only in which
++    // emitter is invoked in apply_layer_cooldown.
++    enum class CoolingStrategy { Slowdown, ParkAndWait, CoolingTower };
++    CoolingStrategy             cooling_strategy = CoolingStrategy::Slowdown;
++    float                       park_retract_length = 0.f;
++    float                       park_z_hop = 0.f;
++    std::optional<Vec2f>        park_point;
++    float                       pause_needed = 0.f;
+ 
+     // Parsed lines.
+     std::vector<CoolingLine>    lines;
+@@ -346,6 +704,21 @@ std::vector<PerExtruderAdjustments> CoolingBuffer::parse_layer_gcode(const std::
+         adj.slow_down_min_speed           = float(m_config.slow_down_min_speed.get_at(extruder_id));
+         // ORCA: To enable dont slow down external perimeters feature per filament (extruder)
+         adj.dont_slow_down_outer_wall   = m_config.dont_slow_down_outer_wall.get_at(extruder_id);
++        // Park-and-wait / cooling-tower: per-extruder strategy + retract/z-hop
++        // hints. Cooling tower reuses park_and_wait_retract_length / z_hop for
++        // its visit travel — the kinematics of "lift, travel, drop" are the
++        // same; only the in-block behaviour differs (G4 dwell vs spiral wall).
++        adj.park_retract_length  = float(m_config.park_and_wait_retract_length.get_at(extruder_id));
++        adj.park_z_hop           = float(m_config.park_and_wait_z_hop.get_at(extruder_id));
++        {
++            const int strat = m_config.min_layer_time_strategy.get_at(extruder_id);
++            if (strat == static_cast<int>(mltsParkAndWait))
++                adj.cooling_strategy = PerExtruderAdjustments::CoolingStrategy::ParkAndWait;
++            else if (strat == static_cast<int>(mltsCoolingTower))
++                adj.cooling_strategy = PerExtruderAdjustments::CoolingStrategy::CoolingTower;
++            else
++                adj.cooling_strategy = PerExtruderAdjustments::CoolingStrategy::Slowdown;
++        }
+         map_extruder_to_per_extruder_adjustment[extruder_id] = i;
+     }
+ 
+@@ -540,6 +913,22 @@ std::vector<PerExtruderAdjustments> CoolingBuffer::parse_layer_gcode(const std::
+                 (pos_P > 0) ? atof(sline.c_str() + pos_P + 1) * 0.001 : 0.);
+         } else if (boost::starts_with(sline, ";_FORCE_RESUME_FAN_SPEED")) {
+             line.type = CoolingLine::TYPE_FORCE_RESUME_FAN;
++        } else if (boost::starts_with(sline, "; PARK_HINT")) {
++            // Park-and-wait hint emitted by GCode::process_layer. Populates the
++            // corresponding extruder's park_point + cooling_strategy. Malformed
++            // lines are silently ignored — adj.cooling_strategy then keeps the
++            // default (Slowdown) set above, so cooling degrades gracefully.
++            if (auto hint = parse_park_hint_line(sline);
++                hint && hint->extruder_id < map_extruder_to_per_extruder_adjustment.size())
++            {
++                auto &a = per_extruder_adjustments[map_extruder_to_per_extruder_adjustment[hint->extruder_id]];
++                a.park_point = hint->point;
++                if (hint->is_park_and_wait)
++                    a.cooling_strategy = PerExtruderAdjustments::CoolingStrategy::ParkAndWait;
++                else if (hint->is_cooling_tower)
++                    a.cooling_strategy = PerExtruderAdjustments::CoolingStrategy::CoolingTower;
++            }
++            // line.type stays 0 → not stored in adjustment->lines (comment, no time cost).
+         }
+ 
+         // Orca: For any movements before this layer's first ever extrusion, we exclude them from the layer time calculation.
+@@ -649,6 +1038,32 @@ float CoolingBuffer::calculate_layer_slowdown(std::vector<PerExtruderAdjustments
+         adj.time_total  = adj.elapsed_time_total();
+         // Maximum time for this extruder, when all extrusion moves are slowed down to min_extrusion_speed.
+         adj.time_maximum = adj.maximum_time_after_slowdown(true);
++        // ParkAndWait / CoolingTower: do NOT stretch feedrates. Instead compute
++        // the pause needed at the park point (later consumed by apply_layer_cooldown)
++        // and treat this extruder as non-adjustable for the rest of the layer.
++        // Both strategies pay the same round-trip overhead (retract, lift, travel
++        // both ways, z-hop) — compute_park_pause_needed is shared.
++        if (adj.cooling_strategy == PerExtruderAdjustments::CoolingStrategy::ParkAndWait
++            || adj.cooling_strategy == PerExtruderAdjustments::CoolingStrategy::CoolingTower) {
++            const float travel_speed  = float(m_config.travel_speed.value);
++            const float z_speed       = float(m_config.travel_speed_z.value);
++            const float retract_speed = adj.extruder_id < m_config.retraction_speed.size()
++                ? float(m_config.retraction_speed.get_at(adj.extruder_id))
++                : travel_speed;
++            const Vec2f current_xy(m_current_pos[0], m_current_pos[1]);
++            adj.pause_needed = compute_park_pause_needed(
++                adj.slow_down_layer_time,
++                adj.time_total,
++                adj.park_point,
++                current_xy,
++                adj.park_retract_length,
++                adj.park_z_hop,
++                travel_speed,
++                z_speed,
++                retract_speed);
++            elapsed_time_total0 += adj.time_total;
++            continue;
++        }
+         if (adj.cooling_slow_down_enabled && adj.lines.size() > 0) {
+             by_slowdown_time.emplace_back(&adj);
+             // sorts the lines, also sets adj.time_non_adjustable
+@@ -1006,6 +1421,116 @@ std::string CoolingBuffer::apply_layer_cooldown(
+     if (pos < gcode_end)
+         new_gcode.append(pos, gcode_end - pos);
+ 
++    // Park-and-wait / cooling-tower: dispatch the per-extruder cooling block.
++    // Runs AFTER all per-extruder slowdown logic so the layer-time accounting
++    // is final. pause_needed < 1.0s (park) or < cooling_tower_min_dwell
++    // (tower) is treated as "not worth the round-trip" and skipped.
++    for (PerExtruderAdjustments &adj : per_extruder_adjustments) {
++        if (! adj.park_point.has_value())
++            continue;
++
++        const float travel_speed  = float(m_config.travel_speed.value);
++        const float z_speed       = float(m_config.travel_speed_z.value);
++        const float retract_speed = adj.extruder_id < m_config.retraction_speed.size()
++                                    ? float(m_config.retraction_speed.get_at(adj.extruder_id))
++                                    : travel_speed;
++        const bool  rel_e         = m_config.use_relative_e_distances.value;
++
++        if (adj.cooling_strategy == PerExtruderAdjustments::CoolingStrategy::ParkAndWait) {
++            if (adj.pause_needed < 1.0f) continue;
++            ParkSequenceInputs in;
++            in.layer_id            = int(layer_id);
++            in.park_point          = *adj.park_point;
++            in.cur_z               = m_current_pos[2];
++            in.park_z_hop          = adj.park_z_hop;
++            in.pause_needed        = adj.pause_needed;
++            in.park_retract_length = adj.park_retract_length;
++            in.travel_speed        = travel_speed;
++            in.travel_speed_z      = z_speed;
++            in.retract_speed       = retract_speed;
++            in.use_relative_e_distances = rel_e;
++            emit_park_sequence(in, new_gcode);
++
++        } else if (adj.cooling_strategy == PerExtruderAdjustments::CoolingStrategy::CoolingTower) {
++            const float min_dwell = float(m_config.cooling_tower_min_dwell.value);
++            if (adj.pause_needed < min_dwell) continue;
++
++            // First-ever visit on this print: lay the brim down once so the
++            // tower has bed adhesion. This runs before the first spiral, at
++            // the model's first-layer Z.
++            if (! m_cooling_tower_brim_emitted) {
++                const int brim_loops = 4;  // V1 default; TODO: expose as config
++                CoolingTowerBrimInputs brim;
++                brim.tower_xy          = *adj.park_point;
++                brim.loops             = brim_loops;
++                brim.first_layer_z     = float(m_config.initial_layer_print_height.value);
++                brim.tower_diameter    = float(m_config.cooling_tower_diameter.value);
++                brim.line_width        = float(m_config.initial_layer_line_width.get_abs_value(
++                                              m_config.nozzle_diameter.get_at(adj.extruder_id)));
++                brim.filament_diameter = adj.extruder_id < m_config.filament_diameter.size()
++                                         ? float(m_config.filament_diameter.get_at(adj.extruder_id))
++                                         : 1.75f;
++                brim.speed             = float(m_config.cooling_tower_speed.value);
++                brim.travel_speed      = travel_speed;
++                brim.travel_speed_z    = z_speed;
++                brim.retract_length    = adj.park_retract_length;
++                brim.retract_speed     = retract_speed;
++                brim.use_relative_e_distances = rel_e;
++                emit_cooling_tower_brim(brim, new_gcode);
++                m_cooling_tower_top_z = brim.first_layer_z;
++                m_cooling_tower_brim_emitted = true;
++            }
++
++            CoolingTowerVisitInputs in;
++            in.layer_id            = int(layer_id);
++            in.tower_xy            = *adj.park_point;
++            in.prev_tower_top_z    = m_cooling_tower_top_z;
++            in.cur_z               = m_current_pos[2];
++            in.z_hop               = adj.park_z_hop;
++            in.pause_needed        = adj.pause_needed;
++            in.retract_length      = adj.park_retract_length;
++            in.diameter            = float(m_config.cooling_tower_diameter.value);
++            // TODO(cooling-tower V2): plumb the per-object `layer_height` here
++            // instead of hardcoding. PrintConfig (which this CoolingBuffer holds)
++            // does not own it — it lives on PrintObjectConfig — and exposing it
++            // through this path needs either a writer-side cache or threading
++            // the right config object down. For V1, fall back to a safe-ish
++            // default that matches the common 0.2 mm layer height.
++            in.tower_layer_height  = 0.2f;
++            in.tower_line_width    = adj.extruder_id < m_config.filament_diameter.size()
++                                     ? float(m_config.nozzle_diameter.get_at(adj.extruder_id))
++                                     : 0.4f;
++            in.filament_diameter   = adj.extruder_id < m_config.filament_diameter.size()
++                                     ? float(m_config.filament_diameter.get_at(adj.extruder_id))
++                                     : 1.75f;
++            in.tower_speed         = float(m_config.cooling_tower_speed.value);
++            in.travel_speed        = travel_speed;
++            in.travel_speed_z      = z_speed;
++            in.retract_speed       = retract_speed;
++            in.use_relative_e_distances = rel_e;
++
++            // Z-runaway guard: if the spiral would top out above the printer's
++            // print height, fall back to a plain G4 dwell (no visit). Keeps a
++            // pathological config from crashing into the gantry late in a print.
++            const float printable_height = float(m_config.printable_height.value);
++            const float projected_top    = in.prev_tower_top_z + in.tower_layer_height
++                                         + (in.tower_speed * in.pause_needed) * (in.tower_layer_height
++                                           / (3.14159265358979323846f * in.diameter));
++            if (printable_height > 0.f && projected_top > printable_height) {
++                char buf[128];
++                std::snprintf(buf, sizeof(buf),
++                              "; COOLING_TOWER_SKIPPED layer_id=%d "
++                              "reason=projected_top_%.2f>printable_height_%.2f\n"
++                              "G4 P%d\n",
++                              int(layer_id), double(projected_top), double(printable_height),
++                              int(in.pause_needed * 1000.f));
++                new_gcode += buf;
++                continue;
++            }
++            m_cooling_tower_top_z = emit_cooling_tower_visit(in, new_gcode);
++        }
++    }
++
+     return new_gcode;
+ }
+ 
+diff --git a/src/libslic3r/GCode/CoolingBuffer.hpp b/src/libslic3r/GCode/CoolingBuffer.hpp
+index fba27b289b..8059b77293 100644
+--- a/src/libslic3r/GCode/CoolingBuffer.hpp
++++ b/src/libslic3r/GCode/CoolingBuffer.hpp
+@@ -3,6 +3,7 @@
+ 
+ #include "../libslic3r.h"
+ #include <map>
++#include <optional>
+ #include <string>
+ #include <cfloat>
+ 
+@@ -12,6 +13,134 @@ class GCode;
+ class Layer;
+ struct PerExtruderAdjustments;
+ 
++// Parsed contents of a "; PARK_HINT extruder=N x=X y=Y strategy=..." comment
++// emitted by GCode::process_layer when min_layer_time_strategy=park_and_wait.
++// Exposed in the header (rather than .cpp) so it can be unit-tested without
++// constructing a full CoolingBuffer + GCode instance.
++struct ParkHintData {
++    unsigned int extruder_id;
++    Vec2f        point;
++    // True iff the strategy token equals "park_and_wait". Unknown strategies
++    // are returned with both flags false so callers can degrade gracefully
++    // (typically by falling back to Slowdown).
++    bool         is_park_and_wait = false;
++    // True iff the strategy token equals "cooling_tower". Mutually exclusive
++    // with is_park_and_wait; the parser will only ever set one of them.
++    bool         is_cooling_tower = false;
++};
++std::optional<ParkHintData> parse_park_hint_line(const std::string &line);
++
++// Compute the pause required for a ParkAndWait-strategy extruder to reach
++// the minimum layer time threshold, after subtracting fixed travel/retract/
++// z-hop overhead from going to and returning from the park point.
++//
++// All speeds are in mm/s, distances in mm, times in s. The function returns
++// 0 when the layer is already above threshold, when no park_point was
++// computed (geometry-degenerate layer), or when overhead alone exceeds the
++// gap. Exposed in the header so it can be unit-tested without constructing
++// a full CoolingBuffer + GCode instance.
++float compute_park_pause_needed(
++    float threshold,
++    float layer_time,
++    std::optional<Vec2f> park_point,
++    Vec2f current_xy,
++    float park_retract_length,
++    float park_z_hop,
++    float travel_speed,
++    float travel_speed_z,
++    float retract_speed);
++
++// Inputs needed to format the per-layer park-and-wait gcode sequence.
++struct ParkSequenceInputs {
++    int     layer_id;
++    Vec2f   park_point;
++    float   cur_z;                  // mm
++    float   park_z_hop;             // mm
++    float   pause_needed;           // seconds
++    float   park_retract_length;    // mm
++    float   travel_speed;           // mm/s (converted to mm/min internally)
++    float   travel_speed_z;         // mm/s (0 -> falls back to travel_speed)
++    float   retract_speed;          // mm/s
++    // Surrounding G-code's E-coordinate mode. The block always uses
++    // `G92 E0` + `G1 E-N` ... `G1 E0` to retract and un-retract symmetrically,
++    // which only round-trips correctly in ABSOLUTE E mode. When the active
++    // filament profile sets `use_relative_e_distances = 1`, the block is
++    // wrapped in M82/M83 so the un-retract resolves to "move E to absolute 0"
++    // (otherwise `G1 E0` becomes a no-op and filament stays retracted across
++    // the whole rest of the print).
++    bool    use_relative_e_distances = false;
++};
++
++// Format the gcode block (retract, Z-hop, travel, G4 dwell(s), Z-return,
++// unretract) and append to `out`. The pause is split into <=60s G4 chunks
++// for firmware compatibility. Z-invariant: the second G1 Z restores the
++// original cur_z BEFORE the unretract, so any ooze drips on infill, not
++// on the next layer.
++void emit_park_sequence(const ParkSequenceInputs &in, std::string &out);
++
++// Inputs needed to format a per-layer cooling-tower visit (the
++// `cooling_tower` min-layer-time strategy). Unlike park_and_wait, the
++// nozzle does NOT dwell with G4 — it extrudes a single continuous arc of
++// a spiral-vase tower wall for `pause_needed` seconds, keeping the hotend
++// under pressure for the whole wait so the model itself never gets oozed
++// on. `prev_tower_top_z` is the Z where the previous visit ended (0 at
++// print start); this visit's spiral starts one tower_layer_height above
++// that, and grows by `tower_speed * pause_needed / circumference` loops.
++struct CoolingTowerVisitInputs {
++    int     layer_id;
++    Vec2f   tower_xy;
++    float   prev_tower_top_z;       // mm; 0 at print start
++    float   cur_z;                  // mm; model's current Z (return point)
++    float   z_hop;                  // mm
++    float   pause_needed;           // seconds
++    float   retract_length;         // mm
++    float   diameter;               // mm
++    float   tower_layer_height;     // mm rise per full loop
++    float   tower_line_width;       // mm
++    float   filament_diameter;      // mm
++    float   tower_speed;            // mm/s (XY extrusion)
++    float   travel_speed;           // mm/s
++    float   travel_speed_z;         // mm/s (0 -> falls back to travel_speed)
++    float   retract_speed;          // mm/s
++    bool    use_relative_e_distances = false;
++};
++
++// Format and append the cooling-tower visit gcode. Returns the new
++// tower_top_z (where the spiral ended), which the caller stores for the
++// next layer's visit. Spiral is approximated as 20 polyline segments per
++// loop (18° step). Wrapped in M82/M83 when use_relative_e_distances=true,
++// same contract as emit_park_sequence.
++float emit_cooling_tower_visit(const CoolingTowerVisitInputs &in, std::string &out);
++
++// Inputs needed to format the first-layer brim under a cooling tower.
++// Emitted once at the start of the first object layer (BEFORE the first
++// visit), so the tower has bed adhesion before any spiral runs above it.
++struct CoolingTowerBrimInputs {
++    Vec2f   tower_xy;
++    int     loops;                  // number of concentric brim rings; 0 disables
++    float   first_layer_z;          // mm; matches the model's first layer height
++    float   tower_diameter;         // mm; outer Ø of the spiral above
++    float   line_width;             // mm; first-layer line width
++    float   filament_diameter;      // mm
++    float   speed;                  // mm/s; XY extrusion speed
++    float   travel_speed;           // mm/s
++    float   travel_speed_z;         // mm/s
++    float   retract_length;         // mm
++    float   retract_speed;          // mm/s
++    bool    use_relative_e_distances = false;
++};
++void emit_cooling_tower_brim(const CoolingTowerBrimInputs &in, std::string &out);
++
++// Pick a free XY for the cooling tower next to the model. Tries — in order —
++// the right, left, back, and front edge of the model bbox (margin from bbox +
++// half tower diameter), and falls back to the first bed corner that fits if
++// none of those land inside the bed. Always returns a point inside `bed`.
++Vec2f compute_cooling_tower_xy(
++    const BoundingBoxf &model_bbox,
++    const BoundingBoxf &bed,
++    float diameter,
++    float margin);
++
+ // A standalone G-code filter, to control cooling of the print.
+ // The G-code is processed per layer. Once a layer is collected, fan start / stop commands are edited
+ // and the print is modified to stretch over a minimum layer time.
+@@ -57,6 +186,15 @@ private:
+     unsigned int                m_current_extruder;
+     //BBS: current fan speed
+     int                         m_current_fan_speed;
++
++    // Cooling-tower state, shared across all extruders for V1 (the strategy
++    // is intended for single-tool prints; IDEX would need per-tool towers and
++    // is left for a follow-up). m_cooling_tower_top_z is the Z where the LAST
++    // visit's spiral ended — the next visit starts one tower_layer_height
++    // above this. m_cooling_tower_brim_emitted flips true after the brim is
++    // laid (once per print).
++    float                       m_cooling_tower_top_z { 0.f };
++    bool                        m_cooling_tower_brim_emitted { false };
+ };
+ 
+ }
+diff --git a/src/libslic3r/PrintConfig.cpp b/src/libslic3r/PrintConfig.cpp
+index 4f9439b4a4..e3a69d10d7 100644
+--- a/src/libslic3r/PrintConfig.cpp
++++ b/src/libslic3r/PrintConfig.cpp
+@@ -355,6 +355,13 @@ static const t_config_enum_values s_keys_map_TimelapseType = {
+ };
+ CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(TimelapseType)
+ 
++static const t_config_enum_values s_keys_map_MinLayerTimeStrategy = {
++    {"slowdown",      mltsSlowdown},
++    {"park_and_wait", mltsParkAndWait},
++    {"cooling_tower", mltsCoolingTower}
++};
++CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(MinLayerTimeStrategy)
++
+ static const t_config_enum_values s_keys_map_SkirtType = {
+     { "combined", stCombined },
+     { "perobject", stPerObject }
+@@ -3869,6 +3876,86 @@ void PrintConfigDef::init_fff_params()
+     def->mode = comAdvanced;
+     def->set_default_value(new ConfigOptionFloats { 10. });
+ 
++    def = this->add("min_layer_time_strategy", coEnums);
++    def->label = L("Min layer time strategy");
++    def->tooltip = L("How to react when a layer would print faster than slow_down_layer_time. "
++                     "slowdown: reduce feedrates proportionally (legacy). "
++                     "park_and_wait: keep print speed and pause with the head parked over infill. "
++                     "cooling_tower: divert to a hollow spiral-vase tower printed next to the model "
++                     "and keep extruding the tower wall for the duration of the dwell, so the hotend "
++                     "stays under pressure and the model does not get oozed on.");
++    def->enum_keys_map = &ConfigOptionEnum<MinLayerTimeStrategy>::get_enum_values();
++    def->enum_values.push_back("slowdown");
++    def->enum_values.push_back("park_and_wait");
++    def->enum_values.push_back("cooling_tower");
++    def->enum_labels.push_back(L("Slowdown"));
++    def->enum_labels.push_back(L("Park and wait"));
++    def->enum_labels.push_back(L("Cooling tower"));
++    def->mode = comAdvanced;
++    def->set_default_value(new ConfigOptionEnumsGeneric { static_cast<int>(mltsSlowdown) });
++
++    def = this->add("park_and_wait_retract_length", coFloats);
++    def->label = L("Park retract length");
++    def->tooltip = L("Retract length before parking over infill during a park-and-wait pause. "
++                     "Typically longer than the regular travel retract.");
++    def->sidetext = "mm";
++    def->min = 0;
++    def->max = 20;
++    def->mode = comAdvanced;
++    def->set_default_value(new ConfigOptionFloats { 4.0 });
++
++    def = this->add("park_and_wait_z_hop", coFloats);
++    def->label = L("Park Z-hop");
++    def->tooltip = L("Z lift when moving to the park position. Restored to the original Z "
++                     "before un-retract.");
++    def->sidetext = "mm";
++    def->min = 0;
++    def->max = 2;
++    def->mode = comAdvanced;
++    def->set_default_value(new ConfigOptionFloats { 0.4 });
++
++    def = this->add("cooling_tower_diameter", coFloat);
++    def->label = L("Cooling tower diameter");
++    def->tooltip = L("Outer diameter of the hollow spiral-vase tower used by the "
++                     "cooling_tower min-layer-time strategy. Larger diameter -> slower "
++                     "vertical growth of the tower per dwell second.");
++    def->sidetext = "mm";
++    def->min = 3;
++    def->max = 80;
++    def->mode = comAdvanced;
++    def->set_default_value(new ConfigOptionFloat(15.0));
++
++    def = this->add("cooling_tower_speed", coFloat);
++    def->label = L("Cooling tower speed");
++    def->tooltip = L("Extrusion speed at the cooling tower spiral. Slower speed keeps "
++                     "more wait time per millimeter of tower wall and reduces vertical "
++                     "growth per dwell. Defaults to slow_down_min_speed (10 mm/s).");
++    def->sidetext = "mm/s";
++    def->min = 1;
++    def->max = 200;
++    def->mode = comAdvanced;
++    def->set_default_value(new ConfigOptionFloat(10.0));
++
++    def = this->add("cooling_tower_min_dwell", coFloat);
++    def->label = L("Cooling tower minimum dwell");
++    def->tooltip = L("Layers that need less than this dwell to reach slow_down_layer_time "
++                     "skip the tower visit entirely (the round-trip travel + retract is "
++                     "not worth the gain). Equivalent to park_and_wait's 1.0s guard.");
++    def->sidetext = "s";
++    def->min = 0;
++    def->max = 30;
++    def->mode = comAdvanced;
++    def->set_default_value(new ConfigOptionFloat(1.5));
++
++    def = this->add("cooling_tower_position", coPoints);
++    def->label = L("Cooling tower position");
++    def->tooltip = L("Fixed XY position for the cooling tower on the bed. Leave empty to "
++                     "have the slicer auto-place the tower in a free spot next to the "
++                     "model bounding box.");
++    def->sidetext = "mm";
++    def->mode = comAdvanced;
++    def->set_default_value(new ConfigOptionPoints());
++
+     def = this->add("nozzle_diameter", coFloats);
+     def->label = L("Nozzle diameter");
+     def->tooltip = L("The diameter of nozzle.");
+@@ -7591,13 +7678,8 @@ std::map<std::string, std::string> validate(const FullPrintConfig &cfg, bool und
+ #define PRINT_CONFIG_CACHE_INITIALIZE(CLASSES_SEQ) \
+     BOOST_PP_SEQ_FOR_EACH(PRINT_CONFIG_CACHE_ELEMENT_DEFINITION, _, BOOST_PP_TUPLE_TO_SEQ(CLASSES_SEQ)) \
+     int print_config_static_initializer() { \
+-        /* Original upstream logged a BOOST_LOG_TRIVIAL(trace) here as a no-op-prevention */ \
+-        /* anchor. Removed in protype-slicer-daemon: the trace fires from a TU whose */ \
+-        /* static init runs *before* utils.cpp installs the `severity >= warning` filter, */ \
+-        /* and boost.log's implicit default sink writes to std::cout — which corrupts */ \
+-        /* the `daemon schema` JSON payload that codegen.ts parses. The cache-init calls */ \
+-        /* below already have observable side effects (StaticCache mutations) so the */ \
+-        /* compiler can't elide them. */ \
++        /* Putting a trace here to avoid the compiler to optimize out this function. */ \
++        BOOST_LOG_TRIVIAL(trace) << "Initializing StaticPrintConfigs"; \
+         BOOST_PP_SEQ_FOR_EACH(PRINT_CONFIG_CACHE_ELEMENT_INITIALIZATION, _, BOOST_PP_TUPLE_TO_SEQ(CLASSES_SEQ)) \
+         return 1; \
+     }
+diff --git a/src/libslic3r/PrintConfig.hpp b/src/libslic3r/PrintConfig.hpp
+index 1e927a1a13..9639dee21f 100644
+--- a/src/libslic3r/PrintConfig.hpp
++++ b/src/libslic3r/PrintConfig.hpp
+@@ -251,6 +251,12 @@ enum TimelapseType : int {
+     tlSmooth
+ };
+ 
++enum MinLayerTimeStrategy : int {
++    mltsSlowdown      = 0,
++    mltsParkAndWait   = 1,
++    mltsCoolingTower  = 2,
++};
++
+ enum SkirtType {
+     stCombined, stPerObject
+ };
+@@ -471,6 +477,7 @@ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(ForwardCompatibilitySubstitutionRule)
+ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(GCodeThumbnailsFormat)
+ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(CounterboreHoleBridgingOption)
+ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(PrintHostType)
++CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(MinLayerTimeStrategy)
+ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(AuthorizationType)
+ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(WipeTowerWallType)
+ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(PerimeterGeneratorType)
+@@ -1351,6 +1358,13 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
+     ((ConfigOptionBool,               single_loop_draft_shield))
+     ((ConfigOptionFloat,              min_skirt_length))
+     ((ConfigOptionFloats,             slow_down_layer_time))
++    ((ConfigOptionEnumsGeneric,       min_layer_time_strategy))
++    ((ConfigOptionFloats,             park_and_wait_retract_length))
++    ((ConfigOptionFloats,             park_and_wait_z_hop))
++    ((ConfigOptionFloat,              cooling_tower_diameter))
++    ((ConfigOptionFloat,              cooling_tower_speed))
++    ((ConfigOptionFloat,              cooling_tower_min_dwell))
++    ((ConfigOptionPoints,             cooling_tower_position))
+     ((ConfigOptionBool,               spiral_mode))
+     ((ConfigOptionBool,               spiral_mode_smooth))
+     ((ConfigOptionFloatOrPercent,     spiral_mode_max_xy_smoothing))
+diff --git a/tests/fff_print/CMakeLists.txt b/tests/fff_print/CMakeLists.txt
+index 0083742696..673f51444a 100644
+--- a/tests/fff_print/CMakeLists.txt
++++ b/tests/fff_print/CMakeLists.txt
+@@ -9,6 +9,7 @@ add_executable(${_TEST_NAME}_tests
+ 	test_gcode.cpp
+ 	test_gcodewriter.cpp
+ 	test_model.cpp
++	test_park_and_wait.cpp
+ 	test_print.cpp
+ 	test_printgcode.cpp
+ 	test_printobject.cpp
+diff --git a/tests/fff_print/test_park_and_wait.cpp b/tests/fff_print/test_park_and_wait.cpp
+new file mode 100644
+index 0000000000..7a1ea47741
+--- /dev/null
++++ b/tests/fff_print/test_park_and_wait.cpp
+@@ -0,0 +1,654 @@
++#include <catch2/catch.hpp>
++
++#include <sstream>
++#include <string>
++
++#include "test_data.hpp"
++#include "libslic3r/PrintConfig.hpp"
++#include "libslic3r/Layer.hpp"
++#include "libslic3r/Polygon.hpp"
++#include "libslic3r/BoundingBox.hpp"
++#include "libslic3r/GCode.hpp"  // for compute_park_point_from_polygons declaration
++#include "libslic3r/GCode/CoolingBuffer.hpp"  // for parse_park_hint_line
++
++using namespace Slic3r;
++using namespace Slic3r::Test;
++
++// === Unit tests for emit_cooling_tower_visit ===
++//
++// Helper to populate inputs with sensible defaults so each test below only
++// has to override what it cares about. Mirrors the standalone harness used
++// during development.
++static CoolingTowerVisitInputs make_tower_inputs() {
++    CoolingTowerVisitInputs in{};
++    in.layer_id           = 5;
++    in.tower_xy           = Vec2f(200.f, 50.f);
++    in.prev_tower_top_z   = 1.0f;
++    in.cur_z              = 1.2f;
++    in.z_hop              = 0.4f;
++    in.pause_needed       = 4.71f;          // one full loop @ Ø15 / 10 mm/s
++    in.retract_length     = 4.f;
++    in.diameter           = 15.f;
++    in.tower_layer_height = 0.2f;
++    in.tower_line_width   = 0.42f;
++    in.filament_diameter  = 1.75f;
++    in.tower_speed        = 10.f;
++    in.travel_speed       = 200.f;
++    in.travel_speed_z     = 10.f;
++    in.retract_speed      = 30.f;
++    return in;
++}
++
++TEST_CASE("emit_cooling_tower_visit emits one full loop for a circumference-worth dwell",
++          "[cooling_tower][cooling]") {
++    auto in = make_tower_inputs();   // pause_needed = 4.71s ~ 1 full loop
++    std::string out;
++    float top = emit_cooling_tower_visit(in, out);
++
++    CHECK(out.find("; COOLING_TOWER_VISIT") != std::string::npos);
++    CHECK(out.find("; END_COOLING_TOWER_VISIT") != std::string::npos);
++    CHECK(out.find("G92 E0") != std::string::npos);
++    CHECK(out.find("G1 E-4") != std::string::npos);
++    // z_start = prev (1.0) + layer_h (0.2) = 1.2; +1 loop = +0.2 -> top = 1.4
++    CHECK(top == Approx(1.4f).margin(0.001f));
++
++    // 20 polyline segments per loop -> one full loop emits exactly 20 G1 X moves
++    size_t pos = 0;
++    int spiral_moves = 0;
++    while ((pos = out.find("G1 X", pos)) != std::string::npos) { ++spiral_moves; pos += 4; }
++    CHECK(spiral_moves == 20);
++
++    // Absolute-E default: no M82/M83 toggling.
++    CHECK(out.find("M82") == std::string::npos);
++    CHECK(out.find("M83") == std::string::npos);
++}
++
++TEST_CASE("emit_cooling_tower_visit wraps in M82/M83 when use_relative_e_distances=true",
++          "[cooling_tower][cooling]") {
++    auto in = make_tower_inputs();
++    in.use_relative_e_distances = true;
++
++    std::string out;
++    emit_cooling_tower_visit(in, out);
++
++    const size_t p_hdr = out.find("; COOLING_TOWER_VISIT");
++    const size_t p_m82 = out.find("M82");
++    const size_t p_g92 = out.find("G92 E0");
++    const size_t p_m83 = out.find("M83");
++    const size_t p_end = out.find("; END_COOLING_TOWER_VISIT");
++
++    REQUIRE(p_m82 != std::string::npos);
++    REQUIRE(p_m83 != std::string::npos);
++    CHECK(p_hdr < p_m82);
++    CHECK(p_m82 < p_g92);
++    CHECK(p_m83 < p_end);
++}
++
++TEST_CASE("emit_cooling_tower_visit starts an empty tower at z = layer_height",
++          "[cooling_tower][cooling]") {
++    auto in = make_tower_inputs();
++    in.prev_tower_top_z = 0.f;       // empty tower: print start
++    in.cur_z            = 0.3f;
++    in.layer_id         = 1;
++
++    std::string out;
++    float top = emit_cooling_tower_visit(in, out);
++
++    // z_start = 0 + 0.2 = 0.2; +1 loop = 0.4
++    CHECK(top == Approx(0.4f).margin(0.001f));
++    CHECK(out.find("z_start=0.20") != std::string::npos);
++}
++
++TEST_CASE("emit_cooling_tower_visit half-loop dwell -> half a layer_height rise",
++          "[cooling_tower][cooling]") {
++    auto in = make_tower_inputs();
++    in.pause_needed = 2.356f;        // half circumference (π·15/2) / 10mm/s
++
++    std::string out;
++    float top = emit_cooling_tower_visit(in, out);
++
++    // z_start (1.2) + half a layer_height (0.1) -> top = 1.3
++    CHECK(top == Approx(1.3f).margin(0.005f));
++
++    size_t pos = 0;
++    int spiral_moves = 0;
++    while ((pos = out.find("G1 X", pos)) != std::string::npos) { ++spiral_moves; pos += 4; }
++    CHECK(spiral_moves == 10);
++}
++
++TEST_CASE("parse_park_hint_line recognizes strategy=cooling_tower",
++          "[cooling_tower][cooling]") {
++    auto hint = Slic3r::parse_park_hint_line(
++        "; PARK_HINT extruder=0 x=300.000 y=20.000 strategy=cooling_tower");
++    REQUIRE(hint.has_value());
++    CHECK(hint->extruder_id == 0u);
++    CHECK_FALSE(hint->is_park_and_wait);
++    CHECK(hint->is_cooling_tower);
++    CHECK(hint->point.x() == Approx(300.f).margin(0.01f));
++    CHECK(hint->point.y() == Approx(20.f).margin(0.01f));
++}
++
++TEST_CASE("compute_cooling_tower_xy places tower to the right of model bbox when bed has room",
++          "[cooling_tower][cooling]") {
++    // Model 100×100 mm in the front-left quadrant of a 400×400 bed -> right side is free.
++    BoundingBoxf model(Vec2d(50, 50), Vec2d(150, 150));
++    BoundingBoxf bed(Vec2d(0, 0), Vec2d(400, 400));
++
++    Vec2f xy = compute_cooling_tower_xy(model, bed, /*diameter=*/15.f, /*margin=*/3.f);
++
++    // Expected: x = model.max.x + half = 150 + 10.5 = 160.5, y = model center = 100.
++    CHECK(xy.x() == Approx(160.5f).margin(0.01f));
++    CHECK(xy.y() == Approx(100.f).margin(0.01f));
++}
++
++TEST_CASE("compute_cooling_tower_xy falls back to a bed corner when no edge has room",
++          "[cooling_tower][cooling]") {
++    // Model fills almost the entire bed -> no edge slot fits.
++    BoundingBoxf model(Vec2d(15, 15), Vec2d(385, 385));
++    BoundingBoxf bed(Vec2d(0, 0), Vec2d(400, 400));
++
++    Vec2f xy = compute_cooling_tower_xy(model, bed, /*diameter=*/15.f, /*margin=*/3.f);
++
++    // Result must still be inside the bed minus the half-radius margin.
++    CHECK(xy.x() >= 10.5f);
++    CHECK(xy.x() <= 389.5f);
++    CHECK(xy.y() >= 10.5f);
++    CHECK(xy.y() <= 389.5f);
++}
++
++// === Cooling-tower strategy: enum value + config field defaults ===
++//
++// `cooling_tower` is the third option for `min_layer_time_strategy`. When the
++// layer would print faster than the cooling threshold, the toolhead diverts to
++// a hollow spiral-vase tower printed alongside the model and keeps extruding
++// the tower wall for the duration of the dwell. The tower has its own brim and
++// is auto-placed (or pinned via `cooling_tower_position`). New config fields:
++//   cooling_tower_diameter   (mm, default 15.0)  outer Ø of the spiral
++//   cooling_tower_speed      (mm/s, default 10)  extrusion speed at the tower
++//   cooling_tower_min_dwell  (s, default 1.5)    below this — strategy degrades
++//                                                to G4 dwell (no tower visit)
++//   cooling_tower_position   (Points)            empty -> auto-place near model
++
++TEST_CASE("MinLayerTimeStrategy adds CoolingTower as a third value",
++          "[cooling_tower][cooling]") {
++    CHECK(static_cast<int>(mltsSlowdown)     == 0);
++    CHECK(static_cast<int>(mltsParkAndWait)  == 1);
++    CHECK(static_cast<int>(mltsCoolingTower) == 2);
++}
++
++TEST_CASE("MinLayerTimeStrategy round-trips \"cooling_tower\" string key",
++          "[cooling_tower][cooling]") {
++    const auto &m = ConfigOptionEnum<MinLayerTimeStrategy>::get_enum_values();
++    auto it = m.find("cooling_tower");
++    REQUIRE(it != m.end());
++    CHECK(it->second == static_cast<int>(mltsCoolingTower));
++}
++
++TEST_CASE("min_layer_time_strategy registers \"cooling_tower\" as an enum value",
++          "[cooling_tower][cooling]") {
++    auto cfg = DynamicPrintConfig::full_print_config();
++    const ConfigOptionDef *def = cfg.def()->get("min_layer_time_strategy");
++    REQUIRE(def != nullptr);
++    bool has = false;
++    for (const std::string &v : def->enum_values)
++        if (v == "cooling_tower") { has = true; break; }
++    CHECK(has);
++}
++
++TEST_CASE("cooling-tower config fields ship with the expected defaults",
++          "[cooling_tower][cooling]") {
++    auto cfg = DynamicPrintConfig::full_print_config();
++
++    SECTION("cooling_tower_diameter defaults to 15 mm") {
++        const auto *o = cfg.option<ConfigOptionFloat>("cooling_tower_diameter");
++        REQUIRE(o != nullptr);
++        CHECK(o->value == Approx(15.0));
++    }
++    SECTION("cooling_tower_speed defaults to 10 mm/s") {
++        const auto *o = cfg.option<ConfigOptionFloat>("cooling_tower_speed");
++        REQUIRE(o != nullptr);
++        CHECK(o->value == Approx(10.0));
++    }
++    SECTION("cooling_tower_min_dwell defaults to 1.5 s") {
++        const auto *o = cfg.option<ConfigOptionFloat>("cooling_tower_min_dwell");
++        REQUIRE(o != nullptr);
++        CHECK(o->value == Approx(1.5));
++    }
++    SECTION("cooling_tower_position defaults to empty (auto-place)") {
++        const auto *o = cfg.option<ConfigOptionPoints>("cooling_tower_position");
++        REQUIRE(o != nullptr);
++        CHECK(o->values.empty());
++    }
++}
++
++
++TEST_CASE("compute_park_point picks nearest point inside infill polygon", "[park_and_wait]") {
++    // Square infill polygon at (0..100, 0..100), nozzle currently at (150, 50)
++    Polygons infill = { Polygon::new_scale({{0,0}, {100,0}, {100,100}, {0,100}}) };
++    Vec2f last_pos(150.f, 50.f);
++
++    auto park = compute_park_point_from_polygons(
++        infill, last_pos, /*nozzle_d=*/0.4f,
++        /*bed=*/BoundingBoxf(Vec2d(0,0), Vec2d(300,300)));
++
++    REQUIRE(park.has_value());
++    // Nearest infill point should be on the right edge near (100, 50),
++    // inset by nozzle_d (0.4 mm) to keep the nozzle off the polygon edge
++    CHECK(park->x() == Approx(100.f - 0.4f).margin(0.01f));
++    CHECK(park->y() == Approx(50.f).margin(0.01f));
++}
++
++TEST_CASE("compute_park_point returns nullopt for empty infill", "[park_and_wait]") {
++    Polygons infill = {};
++    auto park = compute_park_point_from_polygons(
++        infill, Vec2f(10,10), 0.4f,
++        BoundingBoxf(Vec2d(0,0), Vec2d(300,300)));
++    CHECK_FALSE(park.has_value());
++}
++
++TEST_CASE("compute_park_point clamps result inside bed bbox minus margin", "[park_and_wait]") {
++    // Single infill polygon at the bed corner, nozzle far away
++    Polygons infill = { Polygon::new_scale({{0,0}, {2,0}, {2,2}, {0,2}}) };
++    Vec2f last_pos(-100.f, -100.f);
++
++    auto park = compute_park_point_from_polygons(
++        infill, last_pos, 0.4f,
++        BoundingBoxf(Vec2d(0,0), Vec2d(300,300)));
++
++    REQUIRE(park.has_value());
++    // Inside bed bbox shrunk by 5mm margin on both sides
++    CHECK(park->x() >= 5.f);
++    CHECK(park->x() <= 295.f);
++    CHECK(park->y() >= 5.f);
++    CHECK(park->y() <= 295.f);
++}
++
++TEST_CASE("compute_park_point picks nearest among multiple infill polygons", "[park_and_wait]") {
++    // Two disjoint infill regions; nozzle is closer to the second
++    Polygons infill = {
++        Polygon::new_scale({{  0,  0}, { 10,  0}, { 10, 10}, {  0, 10}}),  // far
++        Polygon::new_scale({{100,100}, {110,100}, {110,110}, {100,110}}),  // near
++    };
++    Vec2f last_pos(115.f, 105.f);
++
++    auto park = compute_park_point_from_polygons(
++        infill, last_pos, 0.4f,
++        BoundingBoxf(Vec2d(0,0), Vec2d(300,300)));
++
++    REQUIRE(park.has_value());
++    // Result must come from the second polygon (right cluster), not the first
++    CHECK(park->x() > 90.f);
++    CHECK(park->y() > 90.f);
++}
++
++TEST_CASE("compute_park_point falls back when infill exists only outside the bed", "[park_and_wait]") {
++    // Polygon entirely outside the printable area
++    Polygons infill = { Polygon::new_scale({{400, 400}, {410, 400}, {410, 410}, {400, 410}}) };
++    Vec2f last_pos(200.f, 200.f);
++
++    auto park = compute_park_point_from_polygons(
++        infill, last_pos, 0.4f,
++        BoundingBoxf(Vec2d(0,0), Vec2d(300,300)));
++
++    // Contract decision: when the chosen point would lie outside the bed,
++    // it is clamped to bed - 5mm margin. The function should never return
++    // a point outside the bed. We don't require nullopt here — Task 8 may
++    // choose either policy. We DO require: any returned value must be
++    // inside the bed minus margin.
++    if (park.has_value()) {
++        CHECK(park->x() >= 5.f);
++        CHECK(park->x() <= 295.f);
++        CHECK(park->y() >= 5.f);
++        CHECK(park->y() <= 295.f);
++    }
++}
++
++// === Integration tests against full slicing pipeline ===
++
++TEST_CASE("GCode emits PARK_HINT trailer when strategy=park_and_wait", "[park_and_wait]") {
++    auto config = Slic3r::DynamicPrintConfig::full_print_config();
++    config.set_deserialize_strict({
++        { "min_layer_time_strategy", "park_and_wait" },
++        { "slow_down_layer_time",    "10" },
++    });
++
++    std::string gcode = Slic3r::Test::slice({ Slic3r::Test::TestMesh::cube_20x20x20 }, config);
++
++    int park_hint_count = 0;
++    int first_layer_change = -1;
++    int line_idx = 0;
++    std::istringstream iss(gcode);
++    for (std::string line; std::getline(iss, line); ) {
++        if (first_layer_change < 0 && line.find(";LAYER_CHANGE") != std::string::npos)
++            first_layer_change = line_idx;
++        if (first_layer_change >= 0
++            && line_idx > first_layer_change
++            && line.find("; PARK_HINT") != std::string::npos)
++            ++park_hint_count;
++        ++line_idx;
++    }
++    CHECK(park_hint_count > 0);
++}
++
++TEST_CASE("GCode emits NO PARK_HINT when strategy=slowdown (backward compat)", "[park_and_wait]") {
++    auto config = Slic3r::DynamicPrintConfig::full_print_config();
++    config.set_deserialize_strict({
++        { "slow_down_layer_time", "10" },
++    });
++
++    std::string gcode = Slic3r::Test::slice({ Slic3r::Test::TestMesh::cube_20x20x20 }, config);
++
++    CHECK(gcode.find("PARK_HINT") == std::string::npos);
++}
++
++// === Unit test for PARK_HINT comment parser ===
++
++TEST_CASE("parse_park_hint_line extracts extruder/x/y/strategy from well-formed line", "[park_and_wait][cooling]") {
++    auto hint = Slic3r::parse_park_hint_line(
++        "; PARK_HINT extruder=0 x=15.500 y=12.300 strategy=park_and_wait");
++    REQUIRE(hint.has_value());
++    CHECK(hint->extruder_id == 0u);
++    CHECK(hint->point.x() == Approx(15.5f).margin(0.01f));
++    CHECK(hint->point.y() == Approx(12.3f).margin(0.01f));
++    CHECK(hint->is_park_and_wait);
++}
++
++TEST_CASE("parse_park_hint_line accepts trailing newline", "[park_and_wait][cooling]") {
++    auto hint = Slic3r::parse_park_hint_line(
++        "; PARK_HINT extruder=2 x=100.000 y=200.000 strategy=park_and_wait\n");
++    REQUIRE(hint.has_value());
++    CHECK(hint->extruder_id == 2u);
++    CHECK(hint->point.x() == Approx(100.f).margin(0.01f));
++    CHECK(hint->point.y() == Approx(200.f).margin(0.01f));
++    CHECK(hint->is_park_and_wait);
++}
++
++TEST_CASE("parse_park_hint_line returns nullopt for non-PARK_HINT lines", "[park_and_wait][cooling]") {
++    CHECK_FALSE(Slic3r::parse_park_hint_line("G1 X10 Y10").has_value());
++    CHECK_FALSE(Slic3r::parse_park_hint_line("; LAYER_CHANGE").has_value());
++    CHECK_FALSE(Slic3r::parse_park_hint_line("").has_value());
++    CHECK_FALSE(Slic3r::parse_park_hint_line("; PARK_HINT garbage").has_value());
++}
++
++TEST_CASE("parse_park_hint_line flags is_park_and_wait=false for unknown strategy", "[park_and_wait][cooling]") {
++    auto hint = Slic3r::parse_park_hint_line(
++        "; PARK_HINT extruder=0 x=5.0 y=5.0 strategy=something_else");
++    // Well-formed shape, just unknown strategy — graceful degradation
++    REQUIRE(hint.has_value());
++    CHECK_FALSE(hint->is_park_and_wait);
++}
++
++// === Unit tests for compute_park_pause_needed ===
++
++TEST_CASE("compute_park_pause_needed returns 0 when layer already above threshold", "[park_and_wait][cooling]") {
++    // Layer takes 15s, threshold is 10s — no pause needed.
++    float pause = Slic3r::compute_park_pause_needed(
++        /*threshold=*/10.f, /*layer_time=*/15.f,
++        /*park_point=*/Vec2f(50.f, 50.f),
++        /*current_xy=*/Vec2f(0.f, 0.f),
++        /*park_retract_length=*/1.f, /*park_z_hop=*/0.5f,
++        /*travel_speed=*/200.f, /*travel_speed_z=*/10.f, /*retract_speed=*/40.f);
++    CHECK(pause == Approx(0.f));
++}
++
++TEST_CASE("compute_park_pause_needed returns 0 when no park_point available", "[park_and_wait][cooling]") {
++    float pause = Slic3r::compute_park_pause_needed(
++        10.f, 2.f, std::nullopt, Vec2f(0.f, 0.f),
++        1.f, 0.5f, 200.f, 10.f, 40.f);
++    CHECK(pause == Approx(0.f));
++}
++
++TEST_CASE("compute_park_pause_needed subtracts travel+retract+zhop overhead", "[park_and_wait][cooling]") {
++    // Layer = 2s, threshold = 10s, gap = 8s.
++    // park_point at (100,0), current at (0,0): dist = 100mm, travel @ 200mm/s
++    //   travel_t  = 2 * 100 / 200 = 1.0s
++    // retract = 1mm @ 40mm/s -> retract_t = 2 * 1 / 40 = 0.05s
++    // z_hop = 0.5mm @ 10mm/s -> zhop_t = 2 * 0.5 / 10 = 0.1s
++    // overhead = 1.15s; pause = 8 - 1.15 = 6.85s
++    float pause = Slic3r::compute_park_pause_needed(
++        /*threshold=*/10.f, /*layer_time=*/2.f,
++        Vec2f(100.f, 0.f), Vec2f(0.f, 0.f),
++        /*park_retract_length=*/1.f, /*park_z_hop=*/0.5f,
++        /*travel_speed=*/200.f, /*travel_speed_z=*/10.f, /*retract_speed=*/40.f);
++    CHECK(pause == Approx(6.85f).margin(0.01f));
++}
++
++TEST_CASE("compute_park_pause_needed clamps to 0 when overhead exceeds gap", "[park_and_wait][cooling]") {
++    // Gap = 0.5s but travel alone is 1s — no pause; just go to park, no extra wait.
++    float pause = Slic3r::compute_park_pause_needed(
++        /*threshold=*/2.5f, /*layer_time=*/2.f,
++        Vec2f(100.f, 0.f), Vec2f(0.f, 0.f),
++        1.f, 0.5f, 200.f, 10.f, 40.f);
++    CHECK(pause == Approx(0.f));
++}
++
++TEST_CASE("compute_park_pause_needed falls back to travel_speed when z_speed is 0", "[park_and_wait][cooling]") {
++    // travel_speed_z = 0 -> falls back to travel_speed for z motions.
++    // dist_xy = 0, retract = 0, z_hop = 1mm at travel_speed 100mm/s
++    //   zhop_t = 2 * 1 / 100 = 0.02s
++    // gap = 10 - 2 = 8s; pause = 8 - 0.02 = 7.98s
++    float pause = Slic3r::compute_park_pause_needed(
++        10.f, 2.f, Vec2f(0.f, 0.f), Vec2f(0.f, 0.f),
++        /*park_retract_length=*/0.f, /*park_z_hop=*/1.f,
++        /*travel_speed=*/100.f, /*travel_speed_z=*/0.f, /*retract_speed=*/40.f);
++    CHECK(pause == Approx(7.98f).margin(0.01f));
++}
++
++// === Integration test: end-to-end strategy=park_and_wait skips feedrate stretching ===
++
++TEST_CASE("ParkAndWait strategy does NOT modify feedrates", "[park_and_wait][cooling][.slice_blocked]") {
++    // BLOCKED: Test::slice baseline SIGSEGV in arrange_objects/InfiniteBed.
++    // This test is checked in for execution once the OrcaSlicer test harness is fixed.
++    // The [.slice_blocked] tag hides this case from default runs (Catch2 skips
++    // tests tagged with a leading '.' unless that tag is requested explicitly).
++    auto config = Slic3r::DynamicPrintConfig::full_print_config();
++    config.set_deserialize_strict({
++        { "min_layer_time_strategy", "park_and_wait" },
++        { "slow_down_layer_time",    "10" },
++        { "inner_wall_speed",        "60" },
++    });
++
++    std::string gcode = Slic3r::Test::slice({ Slic3r::Test::TestMesh::cube_20x20x20 }, config);
++
++    // Some extrusion line should still run at F3600 (60 mm/s) — i.e. NOT slowed down.
++    bool found_at_full_speed = gcode.find(" F3600") != std::string::npos;
++    CHECK(found_at_full_speed);
++}
++
++// === Unit tests for emit_park_sequence ===
++
++TEST_CASE("emit_park_sequence produces well-formed block with Z-invariant", "[park_and_wait][cooling]") {
++    ParkSequenceInputs in;
++    in.layer_id            = 7;
++    in.park_point          = Vec2f(15.5f, 12.3f);
++    in.cur_z               = 1.2f;
++    in.park_z_hop          = 0.4f;
++    in.pause_needed        = 5.3f;
++    in.park_retract_length = 4.0f;
++    in.travel_speed        = 200.f;
++    in.travel_speed_z      = 10.f;
++    in.retract_speed       = 30.f;
++
++    std::string out;
++    emit_park_sequence(in, out);
++
++    // Begin/end markers
++    CHECK(out.find("; PARK_AND_WAIT layer_id=7") != std::string::npos);
++    CHECK(out.find("; END_PARK_AND_WAIT") != std::string::npos);
++    // G-code components (std::fixed + setprecision(2) -> always 2 decimals)
++    CHECK(out.find("G92 E0") != std::string::npos);
++    CHECK(out.find("G1 E-4.00") != std::string::npos);          // retract
++    CHECK(out.find("G0 X15.50 Y12.30") != std::string::npos);   // travel
++    CHECK(out.find("G4 P5300") != std::string::npos);           // dwell
++    // Z-invariant: park_z = cur_z + hop = 1.60, return to 1.20
++    CHECK(out.find("G1 Z1.60") != std::string::npos);
++    CHECK(out.find("G1 Z1.20") != std::string::npos);
++    // Final unretract (integer literal in source)
++    CHECK(out.find("G1 E0 F") != std::string::npos);
++}
++
++// Park sequence emits its retract/unretract pair as `G1 E-<N>` / `G1 E0` around
++// a `G92 E0` reset. That pair only round-trips correctly in **absolute** E mode
++// (where `G1 E0` means "move E to position 0"). When the active filament uses
++// `use_relative_e_distances = 1`, `G1 E0` becomes a no-op (relative move of 0)
++// and the filament stays retracted, starving the next layer's first extrusion
++// of pressure. Fix: wrap the block in M82/M83 when relative-E is active.
++TEST_CASE("emit_park_sequence wraps block in M82/M83 when use_relative_e_distances=true",
++          "[park_and_wait][cooling]") {
++    ParkSequenceInputs in{};
++    in.layer_id                 = 5;
++    in.park_point               = Vec2f(50.f, 50.f);
++    in.cur_z                    = 1.0f;
++    in.park_z_hop               = 0.4f;
++    in.pause_needed             = 5.0f;
++    in.park_retract_length      = 4.0f;
++    in.travel_speed             = 200.f;
++    in.travel_speed_z           = 10.f;
++    in.retract_speed            = 30.f;
++    in.use_relative_e_distances = true;
++
++    std::string out;
++    emit_park_sequence(in, out);
++
++    const size_t pos_header  = out.find("; PARK_AND_WAIT");
++    const size_t pos_m82     = out.find("M82");
++    const size_t pos_g92     = out.find("G92 E0");
++    const size_t pos_retract = out.find("G1 E-4");
++    const size_t pos_unret   = out.find("G1 E0 F");
++    const size_t pos_m83     = out.find("M83");
++    const size_t pos_end     = out.find("; END_PARK_AND_WAIT");
++
++    REQUIRE(pos_header  != std::string::npos);
++    REQUIRE(pos_m82     != std::string::npos);
++    REQUIRE(pos_g92     != std::string::npos);
++    REQUIRE(pos_retract != std::string::npos);
++    REQUIRE(pos_unret   != std::string::npos);
++    REQUIRE(pos_m83     != std::string::npos);
++    REQUIRE(pos_end     != std::string::npos);
++
++    // M82 must enter the block AFTER the header comment, but BEFORE G92/retract,
++    // so the closing `G1 E0` resolves to "move E to absolute 0" and actually
++    // un-retracts the filament. M83 restores the surrounding relative-E contract
++    // AFTER the unretract, BEFORE the END marker.
++    CHECK(pos_header  < pos_m82);
++    CHECK(pos_m82     < pos_g92);
++    CHECK(pos_g92     < pos_retract);
++    CHECK(pos_retract < pos_unret);
++    CHECK(pos_unret   < pos_m83);
++    CHECK(pos_m83     < pos_end);
++}
++
++TEST_CASE("emit_park_sequence emits NO M82/M83 in absolute-E mode (default)",
++          "[park_and_wait][cooling]") {
++    ParkSequenceInputs in{};
++    in.layer_id                 = 5;
++    in.park_point               = Vec2f(50.f, 50.f);
++    in.cur_z                    = 1.0f;
++    in.park_z_hop               = 0.4f;
++    in.pause_needed             = 5.0f;
++    in.park_retract_length      = 4.0f;
++    in.travel_speed             = 200.f;
++    in.travel_speed_z           = 10.f;
++    in.retract_speed            = 30.f;
++    // Default: in.use_relative_e_distances == false (absolute E).
++
++    std::string out;
++    emit_park_sequence(in, out);
++
++    // Absolute-E callers must not have their E mode toggled by the park block.
++    CHECK(out.find("M82") == std::string::npos);
++    CHECK(out.find("M83") == std::string::npos);
++    // The `G1 E-4` retract and `G1 E0` round-trip are still emitted unchanged.
++    CHECK(out.find("G1 E-4") != std::string::npos);
++    CHECK(out.find("G1 E0 F") != std::string::npos);
++}
++
++TEST_CASE("emit_park_sequence splits long pauses into 60s G4 chunks", "[park_and_wait][cooling]") {
++    ParkSequenceInputs in{};
++    in.layer_id            = 1;
++    in.park_point          = Vec2f(100.f, 100.f);
++    in.cur_z               = 0.2f;
++    in.park_z_hop          = 0.4f;
++    in.pause_needed        = 130.f;  // 130s = 60+60+10
++    in.park_retract_length = 4.0f;
++    in.travel_speed        = 200.f;
++    in.travel_speed_z      = 10.f;
++    in.retract_speed       = 30.f;
++
++    std::string out;
++    emit_park_sequence(in, out);
++
++    // Three G4 lines: P60000, P60000, P10000
++    size_t pos = 0;
++    int chunks = 0;
++    while ((pos = out.find("G4 P", pos)) != std::string::npos) { ++chunks; pos += 4; }
++    CHECK(chunks == 3);
++    CHECK(out.find("G4 P60000") != std::string::npos);
++    CHECK(out.find("G4 P10000") != std::string::npos);
++}
++
++// === Integration test: end-to-end park sequence emission ===
++
++TEST_CASE("ParkAndWait emits full park sequence with Z-invariant (integration)",
++          "[park_and_wait][cooling][.slice_blocked]") {
++    // BLOCKED: Test::slice baseline SIGSEGV. Checked in for future.
++    auto config = Slic3r::DynamicPrintConfig::full_print_config();
++    config.set_deserialize_strict({
++        { "min_layer_time_strategy",        "park_and_wait" },
++        { "slow_down_layer_time",           "10" },
++        { "park_and_wait_retract_length",   "4.0" },
++        { "park_and_wait_z_hop",            "0.4" },
++    });
++
++    std::string gcode = Slic3r::Test::slice({ Slic3r::Test::TestMesh::cube_20x20x20 }, config);
++
++    size_t blocks = 0, start = 0;
++    while ((start = gcode.find("; PARK_AND_WAIT ", start)) != std::string::npos) {
++        size_t end = gcode.find("; END_PARK_AND_WAIT", start);
++        REQUIRE(end != std::string::npos);
++        ++blocks;
++        start = end;
++    }
++    CHECK(blocks > 0);
++}
++
++// === Edge case integration tests (Task 14) ===
++
++TEST_CASE("First layer never gets PARK_AND_WAIT regardless of strategy",
++          "[park_and_wait][cooling][.slice_blocked]") {
++    // BLOCKED: Test::slice baseline SIGSEGV. Checked in for future.
++    // Task 9 guards layer_id == 0 from PARK_HINT emission. This test
++    // codifies the contract once the slice harness is fixed.
++    auto config = Slic3r::DynamicPrintConfig::full_print_config();
++    config.set_deserialize_strict({
++        { "min_layer_time_strategy", "park_and_wait" },
++        { "slow_down_layer_time",    "60" },  // huge threshold forces a pause
++    });
++
++    std::string gcode = Slic3r::Test::slice({ Slic3r::Test::TestMesh::cube_20x20x20 }, config);
++
++    // Find first ;LAYER_CHANGE; everything before is layer 0.
++    size_t first_lc = gcode.find(";LAYER_CHANGE");
++    REQUIRE(first_lc != std::string::npos);
++    std::string layer0 = gcode.substr(0, first_lc);
++    CHECK(layer0.find("PARK_AND_WAIT") == std::string::npos);
++    CHECK(layer0.find("PARK_HINT")     == std::string::npos);
++}
++
++TEST_CASE("Pause < 1.0s skips PARK_AND_WAIT block",
++          "[park_and_wait][cooling][.slice_blocked]") {
++    // BLOCKED: Test::slice baseline SIGSEGV. Checked in for future.
++    // Task 13 caller guards on `pause_needed >= 1.0f` before invoking
++    // emit_park_sequence. With a tiny threshold any computed pause is
++    // sub-second so the block must be suppressed (PARK_HINT may still
++    // appear — Task 9 doesn't gate on pause).
++    auto config = Slic3r::DynamicPrintConfig::full_print_config();
++    config.set_deserialize_strict({
++        { "min_layer_time_strategy", "park_and_wait" },
++        { "slow_down_layer_time",    "0.5" },  // tiny threshold -> tiny pause
++    });
++
++    std::string gcode = Slic3r::Test::slice({ Slic3r::Test::TestMesh::cube_20x20x20 }, config);
++
++    CHECK(gcode.find("PARK_AND_WAIT") == std::string::npos);
++}

@@ -1,0 +1,28 @@
+[package]
+name = "slicer-pipeline"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# Forwarded directly to slicer-ffi so callers (slicer-daemon, tests) can
+# compose pipeline + libslic3r with a single `--features with-libslic3r`
+# without spelling out the FFI crate.
+with-libslic3r = ["slicer-ffi/with-libslic3r"]
+
+[dependencies]
+slicer-types = { path = "../slicer-types" }
+slicer-state = { path = "../slicer-state" }
+slicer-ffi = { path = "../slicer-ffi" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+# Only the estimate test, to contrast the slicer's answer with the
+# bounding-box arithmetic §4 exists to replace.
+slicer-geometry = { path = "../slicer-geometry" }

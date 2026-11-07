@@ -1,0 +1,392 @@
+{
+  "schema_version": 1,
+  "machine_id": "qidi-xmax4",
+  "display_name": "QIDI X-Max 4",
+  "bed": {
+    "x": 390.0,
+    "y": 390.0,
+    "z": 340.0
+  },
+  "z_probe": {
+    "point": {
+      "x": 195.0,
+      "y": 195.0
+    },
+    "derivation": "Observed in the machine's own configfile, not in any manual. `[homing_override]` runs `G1 X{km.print_max[0]/2} Y{km.print_max[1]/2} F12000` immediately before `G28.6245197 Z`, and `_km_globals.print_max` reads [390, 390] on the live machine — so Z is probed at the centre of the bed. The chain is `G28` -> `[gcode_macro g28]` -> `LAZY_HOME` -> `G28.6245197 X Y Z` -> `[homing_override]`. Note two inert variants that look like they home but do not: `[homing_override]` only branches on (X and Y and Z) or (X and Y and not Z), so `G28 Z` and `G28 X` alone fall through both branches and home nothing at all.",
+    "triggers": [
+      "G28",
+      "G28 X Y Z"
+    ],
+    "safe_variants": [
+      "G28 X Y"
+    ],
+    "leaves_toolhead_at": {
+      "x": 195.0,
+      "y": 195.0,
+      "z": 10.0
+    }
+  },
+  "probe_operations": [
+    {
+      "command": "G28",
+      "what": "Homes Z by touching the bed at one point.",
+      "derivation": "[homing_override] drives to G1 X{print_max[0]/2} Y{print_max[1]/2} immediately before G28.6245197 Z; _km_globals.print_max reads [390,390] live.",
+      "region": {
+        "kind": "points",
+        "at": [
+          {
+            "x": 195.0,
+            "y": 195.0
+          }
+        ]
+      }
+    },
+    {
+      "command": "Z_TILT_ADJUST",
+      "what": "Levels the two Z motors by probing one point near each side.",
+      "derivation": "[z_tilt] points = 15,202.5 and 375,202.5 in the machine's own configfile.",
+      "region": {
+        "kind": "points",
+        "at": [
+          {
+            "x": 15.0,
+            "y": 202.5
+          },
+          {
+            "x": 375.0,
+            "y": 202.5
+          }
+        ]
+      }
+    },
+    {
+      "command": "G29",
+      "what": "Runs KAMP's adaptive BED_MESH_CALIBRATE, which fits its mesh to the bounding box of the objects being printed and probes a grid across it. On a resume those objects ARE the part already standing on the bed, so this walks a grid straight onto it. This is the widest-reaching probe on the machine and the spec did not have it.",
+      "derivation": "[gcode_macro g29] runs G28 then BED_MESH_CALIBRATE PROFILE=kamp because _km_globals.bedmesh_before_print = 1. [gcode_macro BED_MESH_CALIBRATE] takes the min/max of printer.exclude_object.objects polygons, grows them by _KAMP_Settings.mesh_margin (5, fuzz_amount 0), enforces a minimum of twice the default probe spacing, and clamps to bed_mesh mesh_min 15,15 / mesh_max 375,375 (probe_count 9,9 -> 45 mm spacing -> 90 mm minimum region). With no objects declared it says so on the console and meshes the full clamp rectangle.",
+      "region": {
+        "kind": "adaptive_to_print_area",
+        "clamp_min": {
+          "x": 15.0,
+          "y": 15.0
+        },
+        "clamp_max": {
+          "x": 375.0,
+          "y": 375.0
+        },
+        "margin_mm": 5.0,
+        "min_size_mm": [
+          90.0,
+          90.0
+        ]
+      }
+    },
+    {
+      "command": "probe samples=1",
+      "what": "Touches the bed wherever the toolhead is standing; the vendor start block issues it after G0 Y1.",
+      "derivation": "Observed on the machine's console during a print: `// probe at 195.000,0.999 is z=0.109531`, immediately following the start block's `G0 Y1`.",
+      "region": {
+        "kind": "at_current_position"
+      }
+    }
+  ],
+  "start_block": {
+    "source": "profile:machine_start_gcode (profiles/protype-qidi-xmax4-pla-0.20.json)",
+    "traverses": [
+      {
+        "from": {
+          "x": 195.0,
+          "y": 195.0
+        },
+        "raw": "G1 Z20 F480",
+        "source_line": 24,
+        "to": {
+          "x": 195.0,
+          "y": 195.0
+        },
+        "z": 20.0
+      },
+      {
+        "from": {
+          "x": 195.0,
+          "y": 195.0
+        },
+        "raw": "G1 Y403.5 F2000",
+        "source_line": 26,
+        "to": {
+          "x": 195.0,
+          "y": 403.5
+        },
+        "z": 20.0
+      },
+      {
+        "from": {
+          "x": 203.0,
+          "y": 395.0
+        },
+        "raw": "G1 Y383 F12000",
+        "source_line": 73,
+        "to": {
+          "x": 203.0,
+          "y": 383.0
+        },
+        "z": 10.0
+      },
+      {
+        "from": {
+          "x": 203.0,
+          "y": 383.0
+        },
+        "raw": "G1 X116",
+        "source_line": 74,
+        "to": {
+          "x": 116.0,
+          "y": 383.0
+        },
+        "z": 10.0
+      },
+      {
+        "from": {
+          "x": 116.0,
+          "y": 383.0
+        },
+        "raw": "G1 Y403",
+        "source_line": 75,
+        "to": {
+          "x": 116.0,
+          "y": 403.0
+        },
+        "z": 10.0
+      },
+      {
+        "from": {
+          "x": 180.0,
+          "y": 403.0
+        },
+        "raw": "G1 X195 Y195",
+        "source_line": 87,
+        "to": {
+          "x": 195.0,
+          "y": 195.0
+        },
+        "z": 10.0
+      },
+      {
+        "from": {
+          "x": 195.0,
+          "y": 195.0
+        },
+        "raw": "G1 Y0 F15000",
+        "source_line": 96,
+        "to": {
+          "x": 195.0,
+          "y": 0.0
+        },
+        "z": 10.0
+      },
+      {
+        "from": {
+          "x": 195.0,
+          "y": 0.0
+        },
+        "raw": "G1 X15",
+        "source_line": 97,
+        "to": {
+          "x": 15.0,
+          "y": 0.0
+        },
+        "z": 10.0
+      },
+      {
+        "from": {
+          "x": 15.0,
+          "y": 0.0
+        },
+        "raw": "G1 X3 F5000",
+        "source_line": 98,
+        "to": {
+          "x": 3.0,
+          "y": 0.0
+        },
+        "z": 10.0
+      },
+      {
+        "from": {
+          "x": 3.0,
+          "y": 0.0
+        },
+        "raw": "G1 X4 F1000",
+        "source_line": 100,
+        "to": {
+          "x": 4.0,
+          "y": 0.0
+        },
+        "z": 10.0
+      },
+      {
+        "from": {
+          "x": 4.0,
+          "y": 0.0
+        },
+        "raw": "G1 X3 F5000",
+        "source_line": 101,
+        "to": {
+          "x": 3.0,
+          "y": 0.0
+        },
+        "z": 10.0
+      },
+      {
+        "from": {
+          "x": 3.0,
+          "y": 0.0
+        },
+        "raw": "G1 X15 F3000",
+        "source_line": 104,
+        "to": {
+          "x": 15.0,
+          "y": 0.0
+        },
+        "z": 10.0
+      },
+      {
+        "from": {
+          "x": 15.0,
+          "y": 0.0
+        },
+        "raw": "G1 X20 Y20 F15000",
+        "source_line": 111,
+        "to": {
+          "x": 20.0,
+          "y": 20.0
+        },
+        "z": 10.0
+      },
+      {
+        "from": {
+          "x": 20.0,
+          "y": 20.0
+        },
+        "raw": "G1 X195 Y195 Z10 F20000",
+        "source_line": 115,
+        "to": {
+          "x": 195.0,
+          "y": 195.0
+        },
+        "z": 10.0
+      },
+      {
+        "from": {
+          "x": 215.0,
+          "y": 1.0
+        },
+        "raw": "G1 Z1 F480",
+        "source_line": 135,
+        "to": {
+          "x": 215.0,
+          "y": 1.0
+        },
+        "z": 1.0
+      }
+    ],
+    "unmodelled": [
+      {
+        "raw": "G28",
+        "source_line": 16,
+        "why": "homing motion is the firmware's and is not modelled here; this form probes Z — unsafe over any part, see z_probe.triggers"
+      },
+      {
+        "raw": "G0 Y1",
+        "source_line": 117,
+        "sweep": [
+          {
+            "x": 195.0,
+            "y": 195.0
+          },
+          {
+            "x": 195.0,
+            "y": 1.0
+          }
+        ],
+        "why": "height is unknown here, so clearance over a part cannot be judged"
+      },
+      {
+        "raw": "G1 X175 Y1 F20000",
+        "source_line": 132,
+        "sweep": [
+          {
+            "x": 195.0,
+            "y": 1.0
+          },
+          {
+            "x": 175.0,
+            "y": 1.0
+          }
+        ],
+        "why": "height is unknown here, so clearance over a part cannot be judged"
+      },
+      {
+        "raw": "G1 X215 E20 F{filament_max_volumetric_speed[initial_no_support_extruder]/2/2.4053*60}",
+        "source_line": 134,
+        "sweep": [
+          {
+            "x": 175.0,
+            "y": 1.0
+          },
+          {
+            "x": 215.0,
+            "y": 1.0
+          }
+        ],
+        "why": "height is unknown here, so clearance over a part cannot be judged"
+      }
+    ],
+    "mandatory_lines": {
+      "INIT_MAPPING_VALUE": {
+        "reason": "Binds tool indices to physical filament slots. Without it the machine keeps whatever binding the previous print left behind.",
+        "proof": "Running it flipped `value_t0` in save_variables from `slot2` to `slot0`. Negative evidence from the same evening: with the line deleted, a print that asked for slot 1 fed from slot 3."
+      },
+      "BOX_PRINT_START": {
+        "reason": "Loads filament from the bound slot into the hotend. Manual loading is not required precisely because this line does it.",
+        "proof": "Absent from `/printer/gcode/help` yet demonstrably works — it is registered by a compiled module, not a config macro. Its effect is observable as filament reaching the nozzle with no manual load step."
+      }
+    }
+  },
+  "unknown_commands": "ignored",
+  "tools": {
+    "T0": {
+      "slot_var": "value_t0"
+    },
+    "T1": {
+      "slot_var": "value_t1"
+    },
+    "T2": {
+      "slot_var": "value_t2"
+    },
+    "T3": {
+      "slot_var": "value_t3"
+    }
+  },
+  "telemetry_trust": {
+    "filament_detected": {
+      "valid_when": "printer['filament_switch_sensor filament_switch_sensor'].enabled == true",
+      "means": "State of the filament switch. Carries no information while the sensor is disabled: observed live reading `filament_detected: true` with `enabled: false` on a machine mid-print."
+    },
+    "filament_used": {
+      "means": "Sum of commanded E movement in millimetres. It is what the extruder was told to do, not what reached the nozzle, so it keeps counting through a jam or a stripped filament."
+    },
+    "print_duration": {
+      "means": "Wall-clock since the start block began, which includes purge, Z-tilt and a full 9x9 bed mesh. It is already running long before the first layer, so an idle detector built on it raises a false alarm during legitimate probing."
+    },
+    "print_stats.info.current_layer": {
+      "valid_when": "the G-code has been post-processed to emit SET_PRINT_STATS_INFO CURRENT_LAYER",
+      "means": "Whatever the last CURRENT_LAYER command set. The slicer emits only TOTAL_LAYER, so on unprocessed G-code this stays 0 for the whole print and a stalled job looks identical to a healthy one. Reading 0 is ambiguous in a second way that cost time to untangle: it also reads 0 on a correctly processed file for as long as the start block is running, which on this machine is a Z-tilt plus a full 9x9 bed mesh and takes over ten minutes. A 0 means 'no layer has begun' — not 'this file lacks the command'. Tell the two apart by TOTAL_LAYER being set (the start block has run) together with print_duration still climbing, or by looking in the file."
+    },
+    "print_stats.message": {
+      "means": "Empty for vendor error codes. `QDE_004_006 Extruder loading failure` appears only in the console ring buffer at /server/gcode_store, which overwrites within minutes."
+    },
+    "webcam_snapshot": {
+      "valid_when": "printer['output_pin caselight'].value > 0",
+      "means": "A JPEG from /webcam/?action=snapshot on port 80 — not on the API port 7125, which answers that path with a JSON 404 that reads like a camera fault. The camera returns a perfectly valid HTTP 200 and a well-formed 1920x1080 JPEG with the chamber light off; it is simply black. Measured: 50306 bytes of essentially-black frame while `output_pin caselight` read 0. So a frame arriving is not evidence that the print can be seen. The light follows the screen on this machine — the console shows `[smart_output_pin caselight] SCREEN=..., PRINT=standby -> LIGHT=`, so it goes out when the panel sleeps, with no print-side cause at all. The spec's separate caveat still stands on top of this one: on a small part in the middle of the bed the head blocks the view even when lit."
+    }
+  }
+}
