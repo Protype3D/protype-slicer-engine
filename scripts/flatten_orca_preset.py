@@ -27,6 +27,7 @@ import argparse
 import json
 import os
 import sys
+from collections.abc import Mapping
 from typing import Any
 
 # JSON keys that are bookkeeping metadata (skipped by libslic3r's loader and
@@ -67,24 +68,39 @@ def resolve_preset(profile_dir: str, leaf_dir: str, name: str) -> str:
     raise SystemExit("missing preset file, tried: " + ", ".join(repr(c) for c in candidates))
 
 
-def load_chain(profile_dir: str, leaf: str) -> dict[str, Any]:
+def load_chain_traced(
+    profile_dir: str, leaf: str, index: Mapping[str, str] | None = None
+) -> tuple[dict[str, Any], list[str]]:
     """Load `leaf.json` from profile_dir, then walk `inherits` upward.
 
     `leaf` may carry a vendor subdirectory, e.g. `X4/Generic PLA @X-Max 4`.
+    `index` maps a preset name to its file path (the vendor's `*_list`
+    entries). Every name in the chain, the leaf included, is looked up there
+    first, because a preset's `name` need not match its file name; a name
+    missing from the index falls back to `resolve_preset`.
 
-    Returns a single dict where the leaf's keys override its parents.
+    Returns the merged dict (the leaf's keys override its parents) and the file
+    paths walked, leaf first.
     """
     leaf_dir = os.path.join(profile_dir, os.path.dirname(leaf))
     chain: list[dict[str, Any]] = []
+    paths: list[str] = []
     cur = leaf
     seen: set[str] = set()
     while cur:
         if cur in seen:
             raise SystemExit(f"inherits cycle detected at {cur!r} in {profile_dir}")
         seen.add(cur)
-        with open(resolve_preset(profile_dir, leaf_dir, cur), encoding="utf-8") as f:
-            j = json.load(f)
+        path = index.get(cur) if index is not None else None
+        if path is None:
+            path = resolve_preset(profile_dir, leaf_dir, cur)
+        try:
+            with open(path, encoding="utf-8") as f:
+                j = json.load(f)
+        except FileNotFoundError:
+            raise SystemExit(f"missing preset file {path!r} for {cur!r}") from None
         chain.append(j)
+        paths.append(path)
         cur = j.get("inherits", "")
 
     # Merge root-first so leaf overrides.
@@ -92,7 +108,12 @@ def load_chain(profile_dir: str, leaf: str) -> dict[str, Any]:
     for j in reversed(chain):
         for k, v in j.items():
             merged[k] = v
-    return merged
+    return merged, paths
+
+
+def load_chain(profile_dir: str, leaf: str) -> dict[str, Any]:
+    """`load_chain_traced` without an index and without the path list."""
+    return load_chain_traced(profile_dir, leaf)[0]
 
 
 def strip_meta(d: dict[str, Any]) -> dict[str, Any]:

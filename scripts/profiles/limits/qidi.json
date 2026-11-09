@@ -1,0 +1,17 @@
+{
+ "_comment": "С13: printer.cfg и макросы камеры QIDITECH. Генератор берёт минимум с профилем Orca. printer_cfg: null — открытого printer.cfg нет.",
+ "models": {
+  "qidi-xmax-4": {"printer_cfg": {"url": "https://github.com/QIDITECH/QIDI_MAX4/blob/47fc14cefe064dbd30b90582429fe650883ae900/config/printer.cfg", "max_velocity": 800, "max_accel": 30000, "max_z_velocity": 10, "max_z_accel": 500, "square_corner_velocity": 8},
+                  "chamber": {"max": 65, "source": "https://github.com/QIDITECH/QIDI_MAX4/blob/47fc14cefe064dbd30b90582429fe650883ae900/config/klipper-macros-qd/heaters.cfg#L7"}},
+  "qidi-xplus-4": {"printer_cfg": {"url": "https://github.com/QIDITECH/QIDI_PLUS4/blob/ec595fc903540564be757bcafa745cd5c4a52cd0/config/printer.cfg", "max_velocity": 600, "max_accel": 20000, "max_z_velocity": 20, "max_z_accel": 500, "square_corner_velocity": 8},
+                   "chamber": {"max": 65, "source": "https://github.com/QIDITECH/QIDI_PLUS4/blob/ec595fc903540564be757bcafa745cd5c4a52cd0/config/printer.cfg#L284"}},
+  "qidi-q2": {"printer_cfg": {"url": "https://github.com/QIDITECH/QIDI_Q2/blob/3f6bcc8bc295ecf067b45345c5bdb2139b287f17/config/printer.cfg", "max_velocity": 600, "max_accel": 20000, "max_z_velocity": 20, "max_z_accel": 500, "square_corner_velocity": 8},
+              "chamber": {"max": 65, "source": "https://github.com/QIDITECH/QIDI_Q2/blob/3f6bcc8bc295ecf067b45345c5bdb2139b287f17/config/gcode_macro.cfg#L638"}},
+  "qidi-q2c": {"printer_cfg": null, "chamber": {"max": 0, "source": "https://us.qidi3d.com/pages/qidi-q2c-techspecs (нагрева камеры нет)"}},
+  "qidi-q1pro": {"printer_cfg": {"url": "https://github.com/QIDITECH/QIDI_Q1_Pro/blob/61836007215a8b4f71418ac62059bc81c1f40b93/config/printer.cfg", "max_velocity": 600, "max_accel": 20000, "max_z_velocity": 10, "max_z_accel": 500, "square_corner_velocity": 8},
+                 "chamber": {"max": 60, "source": "https://github.com/QIDITECH/QIDI_Q1_Pro/blob/61836007215a8b4f71418ac62059bc81c1f40b93/config/gcode_macro.cfg#L480"}},
+  "qidi-xmax-3": {"printer_cfg": null, "chamber": {"max": 65, "source": "https://qidi3d.com/products/qidi-x-max-3"}},
+  "qidi-xplus-3": {"printer_cfg": null, "chamber": {"max": 65, "source": "исследование 07.11 §2: до 65 по QIDI, QIDI AU пишет 60"}},
+  "qidi-xsmart-3": {"printer_cfg": null, "chamber": {"max": 65, "source": "только профиль Orca: support_chamber_temp_control = 1"}}
+ }
+}

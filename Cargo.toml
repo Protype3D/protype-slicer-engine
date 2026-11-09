@@ -47,7 +47,9 @@ hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
 http-body-util = "0.1"
 libc = "0.2"
+windows-sys = "0.61"
 cxx = "1"
 cxx-build = "1"
 manifold-rust = { version = "0.10", features = ["parallel"] }
 base64 = "0.22"
+png = "0.17"

@@ -99,6 +99,9 @@ pub struct SliceRequest {
     /// daemon, or pass a whole profile. A key named here wins over the
     /// schema baseline. Empty = the schema baseline over the bundled preset.
     pub config_overrides: Vec<slicer_ffi::ConfigOverride>,
+    /// Header line, scene snapshot and machine family for the G-code file.
+    /// `SliceContext::default()` for callers that have none (CLI, estimate).
+    pub context: slicer_ffi::SliceContext,
 }
 
 #[derive(Debug, Clone)]
@@ -366,6 +369,7 @@ pub fn run_slice_blocking(req: SliceRequest) -> Result<SliceOutcome, SliceError>
         // scripted use case.
         cancel: None,
         idex,
+        context: req.context.clone(),
     });
 
     if outcome.canceled {

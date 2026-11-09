@@ -8,7 +8,7 @@
 //! unpaired edges — which meant one spelling of the same shape built as
 //! a chamfered part and failed as a plain one. Measured 2026-08-21.
 
-use crate::tree::{CsgNode, LoftSection};
+use crate::tree::{CsgNode, LoftSection, MAX_TWIST_EDGE_BEND_MM};
 
 /// Two outline points closer than this are the same point.
 ///
@@ -96,6 +96,71 @@ fn cross(a: [f64; 2], b: [f64; 2], c: [f64; 2]) -> f64 {
     (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
 }
 
+/// `outline` with every edge too long for a twist of `per_division_deg`
+/// per layer cut into equal pieces, so none strays more than
+/// `MAX_TWIST_EDGE_BEND_MM` from the twisted surface between two layers.
+///
+/// The outline is a closed ring: the edge from the last point back to the
+/// first is cut like the others. Its own points stay, in order, with the
+/// cuts between them. A zero turn — no twist — comes back unchanged, and so
+/// does a ring whose edges are all short enough for the turn. A thread
+/// section is not exempt: a coarse one, few points per turn of a wide line,
+/// has edges near a millimetre and is cut once the turn per layer
+/// passes about 11°.
+pub fn split_for_twist(outline: &[[f64; 2]], per_division_deg: f64) -> Vec<[f64; 2]> {
+    let n = outline.len();
+    twist_pieces(outline, per_division_deg)
+        .enumerate()
+        .flat_map(|(i, pieces)| {
+            let (a, b) = (outline[i], outline[(i + 1) % n]);
+            (0..pieces).map(move |k| {
+                if k == 0 {
+                    return a;
+                }
+                let t = k as f64 / pieces as f64;
+                [a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])]
+            })
+        })
+        .collect()
+}
+
+/// `split_for_twist(outline, per_division_deg).len()`, without building
+/// the points — what the vertex budget counts before it lets a node build.
+pub fn split_for_twist_len(outline: &[[f64; 2]], per_division_deg: f64) -> usize {
+    twist_pieces(outline, per_division_deg).sum()
+}
+
+/// How many pieces each edge of the ring is cut into, edge `i` running
+/// from point `i` to the next. One for every edge when nothing turns.
+fn twist_pieces(outline: &[[f64; 2]], per_division_deg: f64) -> impl Iterator<Item = usize> + '_ {
+    let longest = longest_twist_edge(per_division_deg);
+    let n = outline.len();
+    (0..n).map(move |i| {
+        let (a, b) = (outline[i], outline[(i + 1) % n]);
+        let length = (b[0] - a[0]).hypot(b[1] - a[1]);
+        match longest {
+            // `as` saturates and takes NaN to zero; every edge is at least
+            // one piece, the edge itself.
+            Some(longest) => ((length / longest).ceil() as usize).max(1),
+            None => 1,
+        }
+    })
+}
+
+/// Longest edge whose bend between two layers, ¼·L·sin θ, stays within
+/// `MAX_TWIST_EDGE_BEND_MM`; `None` when the outline does not turn. The
+/// turn is taken either way and held to a quarter turn, past which the
+/// formula stops growing with it — validation caps it far below that.
+fn longest_twist_edge(per_division_deg: f64) -> Option<f64> {
+    let turn = per_division_deg.abs();
+    // Zero, and NaN, which fails every comparison, turn nothing.
+    if turn > 0.0 {
+        Some(4.0 * MAX_TWIST_EDGE_BEND_MM / turn.min(90.0).to_radians().sin())
+    } else {
+        None
+    }
+}
+
 /// Rewrite every outline in `node` into its canonical closed loop.
 ///
 /// A rewrite rather than a refusal: the redundant closing point is the
@@ -104,9 +169,16 @@ fn cross(a: [f64; 2], b: [f64; 2], c: [f64; 2]) -> f64 {
 /// trip to say so.
 pub fn normalize(node: &CsgNode) -> CsgNode {
     match node {
-        CsgNode::Extrude { outline, height } => CsgNode::Extrude {
+        CsgNode::Extrude {
+            outline,
+            height,
+            twist_deg,
+            divisions,
+        } => CsgNode::Extrude {
             outline: closed_loop(outline),
             height: *height,
+            twist_deg: *twist_deg,
+            divisions: *divisions,
         },
         CsgNode::Revolve {
             outline,

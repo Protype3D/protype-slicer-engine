@@ -25,6 +25,11 @@ slicer-types = "общие типы RPC-параметров и событий �
 slicer-verify = "проверки с доказанной способностью краснеть: отверстия, посадки, нависания"
 
 [rpc]
+# state.snapshot additionally returns autosave { working: bool,
+# reason: string|null, path: string|null }. This is the daemon's own writer:
+# an external agent cannot know whether its journal/checkpoint was synced.
+# Failures include startup; the next mutation retries a full snapshot.
+# Isolated runs may set PROTYPE_SLICER_DATA_DIR (all daemon app data).
 # Равно `slicer_rpc::methods::METHODS`: ветки `match` в `Dispatcher::handle`.
 methods = [
     "adaptive.list",
@@ -79,6 +84,7 @@ methods = [
     "preset.delete",
     "preset.list",
     "preset.save",
+    "project.discard_autosave",
     "project.discard_recovery",
     "project.export_gcode",
     "project.new",
@@ -118,6 +124,7 @@ capabilities = [
     "geometry.build",
     "geometry.csg_import_v1",
     "geometry.engrave_serial",
+    "geometry.extrude_twist",
     "geometry.surface_relief_v1",
     "machine.passport",
     "mesh.measure",

@@ -69,6 +69,7 @@ pub fn handle_estimate(objects: &SlicedObjects, params: Value) -> Result<Value, 
             .into_iter()
             .map(|(key, value)| slicer_ffi::ConfigOverride { key, value })
             .collect(),
+        context: slicer_ffi::SliceContext::default(),
     });
     // The G-code was a means to the numbers; it is not the caller's.
     let _ = std::fs::remove_file(&output);

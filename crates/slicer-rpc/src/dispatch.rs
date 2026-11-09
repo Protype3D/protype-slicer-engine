@@ -6,6 +6,7 @@ use crate::methods::{capabilities, METHODS};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use slicer_ffi::gcode_header;
 use slicer_ffi::CancelHandle;
 use slicer_ffi::OptionJoinKind;
 use slicer_state::{ObjectRecord, StateLayer};
@@ -152,6 +153,22 @@ struct SliceRequestParams {
     /// slice.
     #[serde(default)]
     calibration_test: Option<slicer_ffi::CalibrationTest>,
+    /// Line written under the generation banner of the G-code header. Must
+    /// start with `Protype Slicer `. Absent = the engine's own line.
+    #[serde(default)]
+    producer_line: Option<String>,
+    /// Scene snapshot (PNG, optionally a data URL) the G-code thumbnails
+    /// are made from, with its size. Absent or empty = no thumbnails.
+    #[serde(default)]
+    preview_png_base64: Option<String>,
+    #[serde(default)]
+    preview_width: Option<u32>,
+    #[serde(default)]
+    preview_height: Option<u32>,
+    /// The machine is a Bambu one and keeps the Bambu keys of the built-in
+    /// preset.
+    #[serde(default)]
+    is_bbl_machine: bool,
 }
 
 #[derive(Deserialize)]
@@ -188,10 +205,6 @@ struct PresetSaveParams {
     #[serde(default = "default_true")]
     activate: bool,
 }
-
-const GCODE_THUMBNAIL_MAX_BASE64_BYTES: usize = 5 * 1024 * 1024;
-const GCODE_THUMBNAIL_MAX_DIMENSION: u32 = 2048;
-const GCODE_THUMBNAIL_LINE_WIDTH: usize = 78;
 
 fn default_true() -> bool {
     true
@@ -1002,76 +1015,6 @@ pub(crate) fn object_slice_inputs(
 /// blocking-pool thread instead of a tokio worker.
 pub(crate) static STEP_FFI_LOCK: StdMutex<()> = StdMutex::new(());
 
-fn build_gcode_thumbnail_block(
-    base64: Option<&str>,
-    width: Option<u32>,
-    height: Option<u32>,
-) -> Result<Option<String>, RpcError> {
-    let Some(raw_base64) = base64 else {
-        return Ok(None);
-    };
-    let trimmed = raw_base64.trim();
-    if trimmed.is_empty() {
-        return Ok(None);
-    }
-    let payload = trimmed
-        .strip_prefix("data:image/png;base64,")
-        .unwrap_or(trimmed);
-    let normalized: String = payload.chars().filter(|ch| !ch.is_whitespace()).collect();
-    if normalized.is_empty() {
-        return Ok(None);
-    }
-    if normalized.len() > GCODE_THUMBNAIL_MAX_BASE64_BYTES {
-        return Err(RpcError::Project(format!(
-            "preview_png_base64 is too large: {} bytes",
-            normalized.len()
-        )));
-    }
-    if !normalized
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'='))
-    {
-        return Err(RpcError::Project(
-            "preview_png_base64 contains non-base64 characters".to_string(),
-        ));
-    }
-    let width = width.ok_or_else(|| {
-        RpcError::Project("preview_width is required when preview_png_base64 is set".to_string())
-    })?;
-    let height = height.ok_or_else(|| {
-        RpcError::Project("preview_height is required when preview_png_base64 is set".to_string())
-    })?;
-    if width == 0
-        || height == 0
-        || width > GCODE_THUMBNAIL_MAX_DIMENSION
-        || height > GCODE_THUMBNAIL_MAX_DIMENSION
-    {
-        return Err(RpcError::Project(format!(
-            "preview dimensions must be between 1 and {GCODE_THUMBNAIL_MAX_DIMENSION}: {width}x{height}"
-        )));
-    }
-
-    let mut block = String::new();
-    block.push_str("; THUMBNAIL_BLOCK_START\n");
-    block.push_str(";\n");
-    block.push_str(&format!(
-        "; thumbnail begin {width}x{height} {}\n",
-        normalized.len()
-    ));
-    for chunk in normalized.as_bytes().chunks(GCODE_THUMBNAIL_LINE_WIDTH) {
-        block.push_str("; ");
-        block.push_str(
-            std::str::from_utf8(chunk).map_err(|e| {
-                RpcError::Project(format!("preview thumbnail encoding failed: {e}"))
-            })?,
-        );
-        block.push('\n');
-    }
-    block.push_str("; thumbnail end\n");
-    block.push_str("; THUMBNAIL_BLOCK_END\n\n");
-    Ok(Some(block))
-}
-
 fn read_value_f64(value: &Value) -> Option<f64> {
     match value {
         Value::Number(n) => n.as_f64(),
@@ -1320,7 +1263,6 @@ fn normalize_config_override_key_value(key: &str, value: String) -> Option<(Stri
         | "bed_visual_overlay_scale_y"
         | "bed_visual_overlay_rotation_deg"
         | "kinematics"
-        | "machine_max_jerk_xy"
         | "silent_mode_supported"
         | "has_chamber_heater"
         | "chamber_max_temperature"
@@ -1336,6 +1278,9 @@ fn normalize_config_override_key_value(key: &str, value: String) -> Option<(Stri
         // `machine_max_acceleration_*`) already carry libslic3r's names and
         // fall through: `_extruding` is the print ceiling `GCodeWriter`
         // clamps accelerations to, not the E-axis limit `_e`.
+        // The profile's one XY jerk names libslic3r's X axis here; the Y axis
+        // is added by `COMPANION_KEYS` (one arm can name a single target).
+        "machine_max_jerk_xy" => "machine_max_jerk_x",
         "machine_notes" => "printer_notes",
         "firmware_retraction" => "use_firmware_retraction",
         "outer_wall_first" => {
@@ -1426,13 +1371,16 @@ fn collect_config_overrides_with(
             let Some((mapped_key, value)) = render_flat_override(key, value, join_of) else {
                 continue;
             };
-            if shadowed_by_libslic3r_spelling(values, key, &mapped_key) {
-                continue;
+            let targets = std::iter::once(mapped_key).chain(companion_keys(key));
+            for target in targets {
+                if shadowed_by_libslic3r_spelling(values, key, &target) {
+                    continue;
+                }
+                overrides.push(slicer_ffi::ConfigOverride {
+                    key: target,
+                    value: value.clone(),
+                });
             }
-            overrides.push(slicer_ffi::ConfigOverride {
-                key: mapped_key,
-                value,
-            });
         }
     }
     let mut multi_filament_vectors: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -1484,6 +1432,23 @@ fn collect_config_overrides_with(
         upsert_config_override(&mut overrides, key, escape_strings_cstyle(&values));
     }
     overrides
+}
+
+/// Machine/process keys that set more than one libslic3r option: (profile key,
+/// option set in addition to the one `normalize_config_override_key_value`
+/// maps it to), with the same value.
+///
+/// `machine_max_jerk_xy` is the profile's one XY jerk (Klipper's
+/// `square_corner_velocity`); libslic3r keeps one per axis. Dropping it left
+/// both at the bundled X1C preset's 9 mm/s under a QIDI `printer.cfg` of 8.
+const COMPANION_KEYS: &[(&str, &str)] = &[("machine_max_jerk_xy", "machine_max_jerk_y")];
+
+/// The options `key` sets beyond its mapped name — see [`COMPANION_KEYS`].
+fn companion_keys(key: &str) -> impl Iterator<Item = String> + '_ {
+    COMPANION_KEYS
+        .iter()
+        .filter(move |(profile_key, _)| *profile_key == key)
+        .map(|(_, companion)| (*companion).to_string())
 }
 
 /// True when `key` is only an alias of `mapped_key` (`force_cooling_for_overhang`
@@ -2127,6 +2092,16 @@ fn method_not_found(method: &str) -> RpcError {
 }
 
 impl Dispatcher {
+    /// Where crashed sessions are looked for: next to this session's own
+    /// autosave, or under the app data when it runs without one.
+    fn autosave_root(&self) -> Result<std::path::PathBuf, RpcError> {
+        match self.state.autosave() {
+            Some(sink) => Ok(sink.root().to_path_buf()),
+            None => slicer_state::autosave::default_root()
+                .map_err(|e| RpcError::Project(format!("autosave directory unknown: {e}"))),
+        }
+    }
+
     pub async fn handle(&self, method: &str, params: Value) -> Result<Value, RpcError> {
         // The public surface is `METHODS`, not whatever arms the `match`
         // below happens to have: a method that is not listed there is
@@ -2154,6 +2129,7 @@ impl Dispatcher {
                 "daemon_dirty": build_info::DIRTY,
             })),
             "state.snapshot" => Ok(json!({
+                "autosave": self.state.autosave_status(),
                 "current_event_id": self.state.current_event_id(),
                 "can_undo": self.state.can_undo(),
                 "can_redo": self.state.can_redo(),
@@ -3002,6 +2978,25 @@ impl Dispatcher {
             "slice.request" => {
                 let p: SliceRequestParams = serde_json::from_value(params)
                     .map_err(|e| RpcError::Project(format!("invalid params: {e}")))?;
+                gcode_header::producer_line(p.producer_line.as_deref())
+                    .map_err(|e| RpcError::Slicing(format!("invalid producer_line: {e}")))?;
+                let preview = crate::preview::preview_payload(
+                    p.preview_png_base64.as_deref(),
+                    p.preview_width,
+                    p.preview_height,
+                )
+                .and_then(|payload| {
+                    payload
+                        .as_ref()
+                        .map(crate::preview::decode_scene_preview)
+                        .transpose()
+                })
+                .map_err(|e| RpcError::Slicing(format!("invalid preview: {e}")))?;
+                let context = slicer_ffi::SliceContext {
+                    producer_line: p.producer_line,
+                    preview,
+                    is_bbl_machine: p.is_bbl_machine,
+                };
                 let fan_lead = p.fan_lead.unwrap_or_default();
                 fan_lead
                     .validate()
@@ -3079,6 +3074,7 @@ impl Dispatcher {
                         resolved_config,
                         fan_lead,
                         calibration_test,
+                        context,
                         snap,
                         run_id,
                     })
@@ -3277,10 +3273,9 @@ impl Dispatcher {
                 if self.state.current_path().as_deref() != Some(path.as_path()) {
                     match acquire_project_lock(&path) {
                         slicer_state::lockfile::AcquireOutcome::Acquired => {}
-                        slicer_state::lockfile::AcquireOutcome::HeldByLivePid { pid } => {
-                            return Err(RpcError::Project(format!(
-                                "project is open in another Protype Slicer instance (pid {pid})"
-                            )));
+                        slicer_state::lockfile::AcquireOutcome::HeldByLivePid { pid, doubt } => {
+                            let lock = slicer_state::lockfile::lock_path_for(&path);
+                            return Err(RpcError::held_by_running_pid(pid, doubt, &lock));
                         }
                         slicer_state::lockfile::AcquireOutcome::HeldByOtherMachine {
                             machine_id,
@@ -3303,17 +3298,9 @@ impl Dispatcher {
                     }
                     self.state.set_current_path(Some(path.clone()));
                 }
-                let snap = self.state.snapshot();
-                slicer_state::persist::save(&path, &snap)
+                self.state
+                    .save_to(&path)
                     .map_err(|e| RpcError::Project(format!("save failed: {e:#}")))?;
-                // After a clean save, the autosave only needs to track future
-                // deltas. Truncate the events.log so recovery doesn't replay
-                // the entire pre-save history.
-                if let Some(sink) = self.state.autosave() {
-                    if let Err(e) = sink.checkpoint() {
-                        tracing::warn!(?e, "autosave checkpoint after save failed");
-                    }
-                }
                 Ok(json!({ "path": p.path }))
             }
             "project.open" => {
@@ -3322,10 +3309,9 @@ impl Dispatcher {
                 let path = std::path::PathBuf::from(&p.path);
                 match acquire_project_lock(&path) {
                     slicer_state::lockfile::AcquireOutcome::Acquired => {}
-                    slicer_state::lockfile::AcquireOutcome::HeldByLivePid { pid } => {
-                        return Err(RpcError::Project(format!(
-                            "project is open in another Protype Slicer instance (pid {pid})"
-                        )));
+                    slicer_state::lockfile::AcquireOutcome::HeldByLivePid { pid, doubt } => {
+                        let lock = slicer_state::lockfile::lock_path_for(&path);
+                        return Err(RpcError::held_by_running_pid(pid, doubt, &lock));
                     }
                     slicer_state::lockfile::AcquireOutcome::HeldByOtherMachine {
                         machine_id,
@@ -3349,14 +3335,12 @@ impl Dispatcher {
                     let _ = slicer_state::lockfile::release(&prev);
                 }
                 self.state.replace_state(loaded, Some(path));
-                if let Some(sink) = self.state.autosave() {
-                    let _ = sink.checkpoint();
-                }
                 Ok(json!({ "path": p.path }))
             }
             "project.recover_list" => {
                 let current = self.state.autosave().map(|s| s.project_id().to_string());
-                let orphans = slicer_state::autosave::list_orphans(current.as_deref())
+                let root = self.autosave_root()?;
+                let orphans = slicer_state::autosave::list_orphans(&root, current.as_deref())
                     .map_err(|e| RpcError::Project(format!("recover_list failed: {e}")))?;
                 Ok(json!({ "orphans": orphans }))
             }
@@ -3367,14 +3351,31 @@ impl Dispatcher {
                 }
                 let p: RecoverParams = serde_json::from_value(params)
                     .map_err(|e| RpcError::Project(format!("invalid params: {e}")))?;
+                let root = self.autosave_root()?;
                 let current = self.state.autosave().map(|s| s.project_id().to_string());
-                let recovered = slicer_state::autosave::recover(&p.project_id, current.as_deref())
-                    .map_err(|e| RpcError::Project(format!("recover failed: {e}")))?;
-                self.state.replace_state(recovered, None);
-                // Once recovered into the live session, drop the orphan
-                // directory so it doesn't show up in the list again.
-                let _ = slicer_state::autosave::discard(&p.project_id, current.as_deref());
+                let recovered =
+                    slicer_state::autosave::recover(&root, &p.project_id, current.as_deref())
+                        .map_err(|e| RpcError::Project(format!("recover failed: {e}")))?;
+                let (_, durable) = self.state.replace_state_checkpointed(recovered, None);
+                // Keep the previous copy until a synced replacement exists.
+                if durable {
+                    let _ =
+                        slicer_state::autosave::discard(&root, &p.project_id, current.as_deref());
+                }
                 Ok(json!({ "project_id": p.project_id }))
+            }
+            "project.discard_autosave" => {
+                // "Don't Save" on the live session: what it recorded must not
+                // come back as a recovery offer on the next launch, however
+                // this daemon goes down. `discarded: false` — no autosave was
+                // attached, so there was nothing to drop.
+                match self.state.discard_autosave() {
+                    None => Ok(json!({ "discarded": false })),
+                    Some(Ok(())) => Ok(json!({ "discarded": true })),
+                    Some(Err(e)) => {
+                        Err(RpcError::Project(format!("discard_autosave failed: {e:#}")))
+                    }
+                }
             }
             "project.discard_recovery" => {
                 #[derive(serde::Deserialize)]
@@ -3384,8 +3385,12 @@ impl Dispatcher {
                 let p: DiscardParams = serde_json::from_value(params)
                     .map_err(|e| RpcError::Project(format!("invalid params: {e}")))?;
                 let current = self.state.autosave().map(|s| s.project_id().to_string());
-                slicer_state::autosave::discard(&p.project_id, current.as_deref())
-                    .map_err(|e| RpcError::Project(format!("discard failed: {e}")))?;
+                slicer_state::autosave::discard(
+                    &self.autosave_root()?,
+                    &p.project_id,
+                    current.as_deref(),
+                )
+                .map_err(|e| RpcError::Project(format!("discard failed: {e}")))?;
                 Ok(json!({ "project_id": p.project_id }))
             }
             "adaptive.list" => {
@@ -3508,18 +3513,26 @@ impl Dispatcher {
                         )));
                     }
                 }
-                let thumbnail_block = build_gcode_thumbnail_block(
+                let payload = crate::preview::preview_payload(
                     p.preview_png_base64.as_deref(),
                     p.preview_width,
                     p.preview_height,
-                )?;
-                let bytes = if let Some(block) = thumbnail_block {
-                    let source = std::fs::read(&info.gcode_path).map_err(|e| {
+                )
+                .map_err(RpcError::Project)?;
+                let source = match &payload {
+                    Some(_) => Some(std::fs::read(&info.gcode_path).map_err(|e| {
                         RpcError::Project(format!("read {} failed: {e}", info.gcode_path))
-                    })?;
-                    let mut exported = Vec::with_capacity(block.len() + source.len());
-                    exported.extend_from_slice(block.as_bytes());
-                    exported.extend_from_slice(&source);
+                    })?),
+                    None => None,
+                };
+                let embedded = match (&payload, &source) {
+                    (Some(payload), Some(source)) => crate::preview::embed_thumbnail_block(
+                        source,
+                        &crate::preview::thumbnail_block(payload),
+                    ),
+                    _ => None,
+                };
+                let bytes = if let Some(exported) = embedded {
                     std::fs::write(&dest, &exported).map_err(|e| {
                         RpcError::Project(format!("write {} failed: {e}", dest.display()))
                     })?;
@@ -3820,6 +3833,7 @@ struct SliceTask {
     resolved_config: Option<ResolvedSliceConfig>,
     fan_lead: slicer_gcode::FanLeadParams,
     calibration_test: Option<slicer_ffi::CalibrationTest>,
+    context: slicer_ffi::SliceContext,
     snap: slicer_state::project::ProjectState,
     run_id: Option<String>,
 }
@@ -3834,6 +3848,7 @@ async fn fake_slice(task: SliceTask) {
         resolved_config,
         fan_lead,
         calibration_test,
+        context,
         snap,
         run_id,
     } = task;
@@ -4049,6 +4064,7 @@ async fn fake_slice(task: SliceTask) {
             objects: objects_for_ffi,
             cancel: Some(cancel_for_ffi),
             idex,
+            context,
         });
         // Still on the blocking thread and before `SliceCompleted`: the window
         // must never read a file the pass is about to rewrite.
@@ -6080,11 +6096,63 @@ mod tests {
             "machine_max_acceleration_y",
             "machine_max_acceleration_e",
             "machine_max_acceleration_extruding",
+            "machine_max_acceleration_z",
+            "machine_max_acceleration_travel",
+            "machine_max_jerk_x",
+            "machine_max_jerk_y",
         ] {
             assert_eq!(
                 normalize_config_override_key_value(key, "3500".to_string()),
                 Some((key.to_string(), "3500".to_string())),
                 "{key} must reach libslic3r under its own name"
+            );
+        }
+    }
+
+    /// The profile keeps one XY jerk (Klipper's `square_corner_velocity`);
+    /// libslic3r has one option per axis. Dropping it left both axes at the
+    /// bundled X1C preset's 9 mm/s under a QIDI `printer.cfg` limit of 8.
+    #[test]
+    fn xy_jerk_reaches_both_libslic3r_axes() {
+        let mut config = resolved_config_with_process(BTreeMap::new());
+        config
+            .machine
+            .insert("machine_max_jerk_xy".to_string(), json!(8.0));
+
+        assert_eq!(
+            override_values(&config, "machine_max_jerk_x"),
+            vec!["8.0".to_string()]
+        );
+        assert_eq!(
+            override_values(&config, "machine_max_jerk_y"),
+            vec!["8.0".to_string()]
+        );
+        assert!(override_values(&config, "machine_max_jerk_xy").is_empty());
+    }
+
+    /// A per-axis jerk under libslic3r's own name is authoritative for its
+    /// axis; the XY jerk still fills the other one.
+    #[test]
+    fn per_axis_jerk_beats_the_xy_jerk_on_its_own_axis() {
+        for (axis, other) in [
+            ("machine_max_jerk_x", "machine_max_jerk_y"),
+            ("machine_max_jerk_y", "machine_max_jerk_x"),
+        ] {
+            let mut config = resolved_config_with_process(BTreeMap::new());
+            config
+                .machine
+                .insert("machine_max_jerk_xy".to_string(), json!(8.0));
+            config.machine.insert(axis.to_string(), json!(5.0));
+
+            assert_eq!(
+                override_values(&config, axis),
+                vec!["5.0".to_string()],
+                "{axis} set explicitly"
+            );
+            assert_eq!(
+                override_values(&config, other),
+                vec!["8.0".to_string()],
+                "{other} from the XY jerk"
             );
         }
     }

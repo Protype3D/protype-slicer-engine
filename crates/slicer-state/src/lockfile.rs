@@ -1,9 +1,11 @@
 //! Lock files for projects (spec §6.7). When a project is opened the
 //! daemon writes `<project>.3mf.lock` naming this host, this install, its
-//! pid and a timestamp. A second open attempt on the same project verifies
-//! via `kill(pid, 0)` that the holder is still alive on this host; a lock of
-//! another host is surfaced to the user but not broken on its own, since
-//! `kill` can't probe other hosts.
+//! pid, when that process started and a timestamp. A second open attempt on
+//! the same project asks `process_owner` whether the holder still runs on
+//! this host: a lock whose holder is proven gone is taken over, one whose
+//! holder can't be verified stays and the refusal says why. A lock of
+//! another host is surfaced to the user but not broken on its own, since its
+//! processes can't be probed from here.
 //!
 //! "This host" is decided by the OS host id (`host_identity`), not by the
 //! per-install `machine_id`: that one is minted per HOME, so a dev build
@@ -13,6 +15,7 @@
 
 use crate::host_identity;
 use crate::paths::app_data_dir;
+use crate::process_owner::{self, Owner};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -32,14 +35,22 @@ pub struct LockFile {
     /// The writer's host name, for the message shown on another machine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hostname: Option<String>,
+    /// When the writing process started, as the OS keeps it (see
+    /// `process_owner`): a later process that got the same pid has another.
+    /// Absent in locks written before it was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_start: Option<u64>,
 }
 
 #[derive(Debug)]
 pub enum AcquireOutcome {
     /// Lock acquired (either fresh, or after taking over a stale one).
     Acquired,
-    /// Same machine, the pid is still alive — refuse.
-    HeldByLivePid { pid: u32 },
+    /// Same host, the pid is still running — refuse. `doubt` says why that
+    /// process may not be the lock's writer when it can't be verified (a
+    /// lock without the writer's start, a start the OS won't tell), for the
+    /// person deciding what to do about the lock.
+    HeldByLivePid { pid: u32, doubt: Option<String> },
     /// Different host — the caller decides whether to override. Carries
     /// what the lock says about its holder, for the question to the user.
     HeldByOtherMachine {
@@ -49,8 +60,8 @@ pub enum AcquireOutcome {
     },
 }
 
-/// Attempt to acquire `<path>.lock`. Stale locks (same host, dead pid)
-/// are silently replaced.
+/// Attempt to acquire `<path>.lock`. Stale locks (same host, holder proven
+/// gone) are replaced.
 pub fn try_acquire(project_path: &Path) -> Result<AcquireOutcome> {
     let lock_path = lock_path_for(project_path);
     let ours = our_lock()?;
@@ -63,10 +74,25 @@ pub fn try_acquire(project_path: &Path) -> Result<AcquireOutcome> {
                 started_at_unix_ms: existing.started_at_unix_ms,
             });
         }
-        if existing.pid != ours.pid && pid_is_alive(existing.pid) {
-            return Ok(AcquireOutcome::HeldByLivePid { pid: existing.pid });
+        // Our own pid is ours, or a predecessor's that ended before we
+        // got it: taken over either way.
+        if existing.pid != ours.pid {
+            let pid = existing.pid;
+            match process_owner::probe(pid, existing.process_start) {
+                Owner::Running => return Ok(AcquireOutcome::HeldByLivePid { pid, doubt: None }),
+                Owner::Unverified(why) => {
+                    return Ok(AcquireOutcome::HeldByLivePid {
+                        pid,
+                        doubt: Some(why),
+                    })
+                }
+                Owner::Gone => tracing::info!(
+                    lock = %lock_path.display(),
+                    pid,
+                    "taking over a project lock whose holder has exited"
+                ),
+            }
         }
-        // Same host, dead pid (or our own) → take over.
     }
 
     write_lock(&lock_path, &ours)?;
@@ -97,6 +123,7 @@ fn our_lock() -> Result<LockFile> {
         started_at_unix_ms: chrono::Utc::now().timestamp_millis(),
         host_id: host_identity::host_id().map(str::to_string),
         hostname: host_identity::hostname(),
+        process_start: process_owner::this_process_start(),
     })
 }
 
@@ -130,7 +157,8 @@ pub fn release(project_path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn lock_path_for(project_path: &Path) -> PathBuf {
+/// Where the lock of `project_path` lives: next to it, `.lock` appended.
+pub fn lock_path_for(project_path: &Path) -> PathBuf {
     let mut s = project_path.as_os_str().to_os_string();
     s.push(".lock");
     PathBuf::from(s)
@@ -194,25 +222,10 @@ fn read_machine_id_file(path: &Path) -> Option<String> {
     }
 }
 
-#[cfg(target_family = "unix")]
-fn pid_is_alive(pid: u32) -> bool {
-    if pid == 0 {
-        return false;
-    }
-    unsafe {
-        libc::kill(pid as i32, 0) == 0
-            || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
-    }
-}
-
-#[cfg(not(target_family = "unix"))]
-fn pid_is_alive(_pid: u32) -> bool {
-    true
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::process_owner::test_support::{finished_pid, Sleeper};
 
     // `nanos()` alone is not unique across parallel tests (macOS clock
     // granularity + thread interleaving can collide), so two tests using
@@ -257,23 +270,23 @@ mod tests {
 
     #[test]
     fn live_pid_blocks_acquire() {
-        let dir = unique_test_dir();
-        std::fs::create_dir_all(&dir).unwrap();
-        let project = dir.join("p.3mf");
-        std::fs::write(&project, b"x").unwrap();
-        let lock = dir.join("p.3mf.lock");
-        // Forge a lock owned by THIS machine but a different (live) pid:
-        // pid=1 (init/launchd) is always alive on Unix.
+        let (dir, project, lock) = project_in_fresh_dir();
+        // A lock owned by THIS machine but another, running process.
+        let holder = Sleeper::spawn();
         let forged = LockFile {
             machine_id: machine_id().unwrap(),
-            pid: 1,
+            pid: holder.pid(),
             started_at_unix_ms: 0,
             host_id: None,
             hostname: None,
+            process_start: process_owner::start_of(holder.pid()),
         };
         std::fs::write(&lock, serde_json::to_vec(&forged).unwrap()).unwrap();
         match try_acquire(&project).unwrap() {
-            AcquireOutcome::HeldByLivePid { pid } => assert_eq!(pid, 1),
+            AcquireOutcome::HeldByLivePid { pid, doubt } => {
+                assert_eq!(pid, holder.pid());
+                assert_eq!(doubt, None, "the holder's start matches: no doubt");
+            }
             other => panic!("expected HeldByLivePid, got {other:?}"),
         }
         std::fs::remove_dir_all(&dir).ok();
@@ -290,17 +303,6 @@ mod tests {
         (dir, project, lock)
     }
 
-    /// A pid nobody holds any more: a child that has already exited and
-    /// been reaped. `kill(pid, 0)` on it answers ESRCH.
-    #[cfg(target_family = "unix")]
-    fn dead_pid() -> u32 {
-        let mut child = std::process::Command::new("true")
-            .spawn()
-            .expect("spawn `true`");
-        child.wait().expect("wait for `true`");
-        child.id()
-    }
-
     fn read_lock(lock: &Path) -> LockFile {
         serde_json::from_slice(&std::fs::read(lock).unwrap()).unwrap()
     }
@@ -310,16 +312,16 @@ mod tests {
     // sandbox, a CI runner) carry different ids. A lock left behind by a
     // killed daemon of the other install must still count as stale here:
     // the host is the same, and its pid can be probed.
-    #[cfg(target_family = "unix")]
     #[test]
     fn stale_lock_from_another_install_on_this_host_is_taken_over() {
         let (dir, project, lock) = project_in_fresh_dir();
         let forged = LockFile {
             machine_id: "other-install".to_string(),
-            pid: dead_pid(),
+            pid: finished_pid(),
             started_at_unix_ms: 0,
             host_id: crate::host_identity::host_id().map(str::to_string),
             hostname: None,
+            process_start: None,
         };
         std::fs::write(&lock, serde_json::to_vec(&forged).unwrap()).unwrap();
 
@@ -337,16 +339,21 @@ mod tests {
     #[test]
     fn live_pid_from_another_install_on_this_host_blocks() {
         let (dir, project, lock) = project_in_fresh_dir();
+        let holder = Sleeper::spawn();
         let forged = LockFile {
             machine_id: "other-install".to_string(),
-            pid: 1,
+            pid: holder.pid(),
             started_at_unix_ms: 0,
             host_id: crate::host_identity::host_id().map(str::to_string),
             hostname: None,
+            process_start: process_owner::start_of(holder.pid()),
         };
         std::fs::write(&lock, serde_json::to_vec(&forged).unwrap()).unwrap();
         match try_acquire(&project).unwrap() {
-            AcquireOutcome::HeldByLivePid { pid } => assert_eq!(pid, 1),
+            AcquireOutcome::HeldByLivePid { pid, doubt } => {
+                assert_eq!(pid, holder.pid());
+                assert_eq!(doubt, None);
+            }
             other => panic!("expected HeldByLivePid, got {other:?}"),
         }
         std::fs::remove_dir_all(&dir).ok();
@@ -361,6 +368,7 @@ mod tests {
             started_at_unix_ms: 1_700_000_000_000,
             host_id: Some("other-host".to_string()),
             hostname: Some("office-pc".to_string()),
+            process_start: None,
         };
         std::fs::write(&lock, serde_json::to_vec(&forged).unwrap()).unwrap();
         match try_acquire(&project).unwrap() {
@@ -439,6 +447,91 @@ mod tests {
             "the lock carries the host id the next daemon on this host will compare against"
         );
         assert_eq!(ours.hostname, crate::host_identity::hostname());
+        release(&project).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // Windows hands a freed pid to the next process within moments: a lock
+    // whose pid now runs a process started at another time is stale.
+    #[test]
+    fn lock_whose_pid_now_runs_a_later_process_is_taken_over() {
+        let (dir, project, lock) = project_in_fresh_dir();
+        let later = Sleeper::spawn();
+        let started = process_owner::start_of(later.pid()).expect("the child's start");
+        let forged = LockFile {
+            machine_id: machine_id().unwrap(),
+            pid: later.pid(),
+            started_at_unix_ms: 0,
+            host_id: crate::host_identity::host_id().map(str::to_string),
+            hostname: None,
+            process_start: Some(started - 1),
+        };
+        std::fs::write(&lock, serde_json::to_vec(&forged).unwrap()).unwrap();
+
+        match try_acquire(&project).unwrap() {
+            AcquireOutcome::Acquired => {}
+            other => panic!("expected Acquired over a reused pid, got {other:?}"),
+        }
+        assert_eq!(read_lock(&lock).pid, std::process::id());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A lock as daemons wrote it before they recorded their start.
+    fn legacy_lock_of(pid: u32) -> Vec<u8> {
+        format!(
+            r#"{{"machine_id":"{}","pid":{pid},"started_at_unix_ms":42}}"#,
+            machine_id().unwrap()
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn legacy_lock_without_a_start_of_a_finished_pid_is_taken_over() {
+        let (dir, project, lock) = project_in_fresh_dir();
+        std::fs::write(&lock, legacy_lock_of(finished_pid())).unwrap();
+
+        match try_acquire(&project).unwrap() {
+            AcquireOutcome::Acquired => {}
+            other => panic!("expected Acquired over a finished pid, got {other:?}"),
+        }
+        assert_eq!(read_lock(&lock).pid, std::process::id());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // Without a start, a running pid may be the writer or a stranger that
+    // got its pid: the lock stays, and the refusal says why it is in doubt.
+    #[test]
+    fn legacy_lock_without_a_start_of_a_running_pid_stays_with_the_reason() {
+        let (dir, project, lock) = project_in_fresh_dir();
+        let holder = Sleeper::spawn();
+        let legacy = legacy_lock_of(holder.pid());
+        std::fs::write(&lock, &legacy).unwrap();
+
+        match try_acquire(&project).unwrap() {
+            AcquireOutcome::HeldByLivePid { pid, doubt } => {
+                assert_eq!(pid, holder.pid());
+                let why = doubt.expect("an unverified holder comes with the reason");
+                assert!(why.contains("older version"), "{why}");
+            }
+            other => panic!("expected HeldByLivePid, got {other:?}"),
+        }
+        assert_eq!(
+            std::fs::read(&lock).unwrap(),
+            legacy,
+            "left exactly as found"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn our_lock_records_when_this_process_started() {
+        let (dir, project, lock) = project_in_fresh_dir();
+        try_acquire(&project).unwrap();
+
+        let ours = read_lock(&lock);
+
+        assert!(ours.process_start.is_some());
+        assert_eq!(ours.process_start, process_owner::this_process_start());
         release(&project).unwrap();
         std::fs::remove_dir_all(&dir).ok();
     }

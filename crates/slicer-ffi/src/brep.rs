@@ -255,7 +255,18 @@ fn build(node: &CsgNode) -> Result<Shape, BrepError> {
         CsgNode::PatternLinear { .. } | CsgNode::PatternCircular { .. } => Err(BrepError::Kernel(
             "patterns must be expanded before building".to_string(),
         )),
-        CsgNode::Extrude { outline, height } => {
+        CsgNode::Extrude {
+            outline,
+            height,
+            twist_deg,
+            ..
+        } => {
+            // Refused rather than built straight: dropping the twist
+            // would hand back a plain prism that looks like success.
+            // `divisions` alone changes nothing for a prism.
+            if twist_deg.is_some_and(|t| t != 0.0) {
+                return Err(BrepError::Unsupported("extrude with twist_deg"));
+            }
             let flat: Vec<f64> = outline.iter().flat_map(|p| [p[0], p[1]]).collect();
             shape(brep_prism(&flat, *height), "extrude")
         }

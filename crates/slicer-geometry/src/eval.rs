@@ -4,7 +4,7 @@ use manifold_rust::types::Error as KernelError;
 
 use crate::error::GeometryError;
 use crate::import::{Imports, MAX_IMPORT_TRIANGLES};
-use crate::tree::CsgNode;
+use crate::tree::{extrude_divisions, twist_per_division, CsgNode};
 
 /// Validate a tree and evaluate it into a solid.
 ///
@@ -218,12 +218,34 @@ fn build(node: &CsgNode, imports: &Imports) -> Manifold {
             let parts: Vec<Manifold> = children.iter().map(|c| build(c, imports)).collect();
             Manifold::hull_manifolds(&parts)
         }
-        CsgNode::Extrude { outline, height } => {
-            let ring: Vec<Vec2> = outline.iter().map(|p| Vec2::new(p[0], p[1])).collect();
-            // n_divisions 0, no twist, unit scale at the top: a straight
-            // prism. Tapered and twisted extrusions are a later call if
-            // anything asks for them.
-            Manifold::extrude(&vec![ring], *height, 0, 0.0, Vec2::new(1.0, 1.0))
+        CsgNode::Extrude {
+            outline,
+            height,
+            twist_deg,
+            divisions,
+        } => {
+            let layers = extrude_divisions(*twist_deg, *divisions);
+            // manifold joins two layers with one diagonal per quad, which
+            // strays from the twisted surface by a quarter of the edge
+            // times the sine of the turn; long edges are cut until that
+            // stays within `MAX_TWIST_EDGE_BEND_MM`. With no twist the
+            // turn is zero and the outline comes back as written.
+            let split =
+                crate::outline::split_for_twist(outline, twist_per_division(*twist_deg, layers));
+            let ring: Vec<Vec2> = split.iter().map(|p| Vec2::new(p[0], p[1])).collect();
+            // manifold builds `n_divisions + 1` slabs, so the layer count
+            // is passed less one. Twist is supported and its sign is
+            // passed through unchanged: positive turns the top
+            // counter-clockwise seen from +Z, pinned by a test. There is
+            // no taper (`scale_top` stays at one).
+            let n_divisions = (layers - 1) as i32;
+            Manifold::extrude(
+                &vec![ring],
+                *height,
+                n_divisions,
+                twist_deg.unwrap_or(0.0),
+                Vec2::new(1.0, 1.0),
+            )
         }
         CsgNode::Revolve {
             outline,

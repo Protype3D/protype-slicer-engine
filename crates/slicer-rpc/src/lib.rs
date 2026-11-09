@@ -12,6 +12,7 @@ pub mod machine;
 pub mod mesh;
 pub mod methods;
 pub mod part;
+mod preview;
 pub mod serial;
 pub mod server;
 pub mod verify;

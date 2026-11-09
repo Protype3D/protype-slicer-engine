@@ -160,6 +160,7 @@ fn main() -> Result<()> {
                 filament_preset_path: filament_preset,
                 idex,
                 config_overrides,
+                context: slicer_ffi::SliceContext::default(),
             };
             tracing::info!(?inputs, ?output, "slicing");
             match slicer_pipeline::run_slice_blocking(req) {
@@ -194,10 +195,11 @@ fn main() -> Result<()> {
                 .build()?;
             runtime.block_on(async move {
                 // Attach session autosave so a crash leaves a recoverable
-                // events.log behind. Failure to set up autosave is non-fatal
-                // (we'd rather serve without it than refuse to boot).
-                let state = match slicer_state::autosave::AutosaveSink::new() {
-                    Ok(sink) => {
+                // events.log behind. Initialization failures remain visible in
+                // state.snapshot and retry a full snapshot on the next edit.
+                let state = match slicer_state::autosave::default_root() {
+                    Ok(root) => {
+                        let sink = slicer_state::autosave::AutosaveSink::start_in(&root);
                         tracing::info!(
                             project_id = sink.project_id(),
                             dir = %sink.dir().display(),
@@ -207,7 +209,7 @@ fn main() -> Result<()> {
                     }
                     Err(e) => {
                         tracing::warn!(?e, "autosave setup failed; running without it");
-                        slicer_state::StateLayer::new()
+                        slicer_state::StateLayer::new().with_autosave_failure(format!("{e:#}"))
                     }
                 };
                 let handle = slicer_rpc::start_server(state.clone(), port).await?;
@@ -219,15 +221,14 @@ fn main() -> Result<()> {
                 // sends SIGTERM with a 3s grace window before escalating to
                 // SIGKILL; without a SIGTERM handler tokio's default would
                 // terminate the process immediately, skipping the lockfile
-                // release + autosave cleanup below.
+                // release below. Autosave survives either signal.
                 shutdown_signal().await?;
                 let _ = handle.shutdown_tx.send(());
                 if let Some(path) = state.current_path() {
                     let _ = slicer_state::lockfile::release(&path);
                 }
-                if let Some(sink) = state.autosave() {
-                    sink.cleanup_on_exit();
-                }
+                // A signal is not the window's explicit save/discard decision.
+                // Leave this session available for recovery.
                 Ok::<(), anyhow::Error>(())
             })
         }

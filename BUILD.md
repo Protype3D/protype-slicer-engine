@@ -128,3 +128,27 @@ target/release/protype-slicer-daemon --version | grep -F "(daemon $daemon, libsl
 
 On Windows, compare the output of `.\target\release\protype-slicer-daemon.exe --version`
 with the two hashes in `REVISION` by eye, or with `Select-String -SimpleMatch`.
+
+## 5. Printer profiles (optional)
+
+The presets in `profiles/catalog/<vendor>/` are generated from OrcaSlicer
+profiles, but the committed JSON files are themselves the editable form of
+these presets: you can use and change them directly.
+
+Regenerating the QIDI catalog needs Python 3.11 or newer (standard library
+only) and git: on first run the generator fetches the pinned OrcaSlicer tag
+over the network with a sparse git checkout.
+
+```sh
+python3 scripts/profiles/generate.py --vendor qidi --orca-tag v2.5.0 \
+  --schema <settings_schema.json> --libslic3r-keys <libslic3r_keys.json> \
+  --out profiles/catalog/qidi
+```
+
+The two inputs, the settings schema and the libslic3r key snapshot, belong to
+Protype Slicer, which is a private repository, and are not published. A
+byte-for-byte rebuild therefore needs those two files from Protype. Their
+sha256 values are recorded in `profiles/catalog/<vendor>/report.json`
+(`inputs`) and identify the exact inputs the published catalog was built from.
+The source of every preset is recorded in its `content.origin` and in the
+package `sources`.

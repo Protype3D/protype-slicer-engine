@@ -1,0 +1,1916 @@
+{
+ "carried_ahead": {},
+ "counts": {
+  "extruder": 32,
+  "filament": 1112,
+  "machine": 32,
+  "process": 171
+ },
+ "derived_not_in_schema": {},
+ "dropped_keys": {
+  "filament": {
+   "additional_cooling_fan_speed": 760,
+   "additional_cooling_fan_speed_unseal": 555,
+   "bed_type": 1111,
+   "box_temperature": 559,
+   "box_temperature_range_high": 574,
+   "box_temperature_range_low": 559,
+   "chamber_temperatures": 15,
+   "cool_plate_temp": 1111,
+   "cool_plate_temp_initial_layer": 1111,
+   "dont_slow_down_outer_wall": 927,
+   "enable_overhang_bridge_fan": 211,
+   "enable_volume_fan": 3,
+   "eng_plate_temp": 1111,
+   "eng_plate_temp_initial_layer": 1111,
+   "fan_cooling_layer_time": 1111,
+   "filament_adhesiveness_category": 586,
+   "filament_cooling_before_tower": 184,
+   "filament_deretraction_speed": 1111,
+   "filament_dev_ams_drying_ams_limitations": 368,
+   "filament_dev_ams_drying_heat_distortion_temperature": 368,
+   "filament_dev_ams_drying_temperature": 368,
+   "filament_dev_ams_drying_time": 368,
+   "filament_dev_chamber_drying_bed_temperature": 368,
+   "filament_dev_chamber_drying_time": 368,
+   "filament_dev_drying_cooling_temperature": 368,
+   "filament_dev_drying_softening_temperature": 368,
+   "filament_flush_temp": 552,
+   "filament_flush_volumetric_speed": 552,
+   "filament_long_retractions_when_ec": 552,
+   "filament_minimal_purge_on_wipe_tower": 1111,
+   "filament_pre_cooling_temperature": 552,
+   "filament_prime_volume": 184,
+   "filament_ramming_travel_time": 552,
+   "filament_ramming_volumetric_speed": 552,
+   "filament_retract_before_wipe": 1111,
+   "filament_retract_restart_extra": 1111,
+   "filament_retract_when_changing_layer": 1111,
+   "filament_retraction_distances_when_ec": 552,
+   "filament_retraction_minimum_travel": 1111,
+   "filament_tower_interface_pre_extrusion_dist": 368,
+   "filament_tower_interface_pre_extrusion_length": 368,
+   "filament_tower_interface_print_temp": 368,
+   "filament_tower_interface_purge_volume": 368,
+   "filament_tower_ironing_area": 368,
+   "filament_velocity_adaptation_factor": 184,
+   "filament_wipe": 1111,
+   "filament_wipe_distance": 1111,
+   "filament_z_hop": 1111,
+   "filament_z_hop_types": 1111,
+   "full_fan_speed_layer": 1111,
+   "impact_strength_z": 391,
+   "no_slow_down_for_cooling_on_outwalls": 184,
+   "overhang_fan_speed": 1111,
+   "overhang_fan_threshold": 1111,
+   "required_nozzle_HRC": 79,
+   "slow_down_min_speed": 1111,
+   "supertack_plate_temp": 1103,
+   "supertack_plate_temp_initial_layer": 1103,
+   "temperature_vitrification": 1111,
+   "textured_cool_plate_temp": 1099,
+   "textured_cool_plate_temp_initial_layer": 1099,
+   "textured_plate_temp": 1099,
+   "textured_plate_temp_initial_layer": 1099
+  },
+  "machine": {
+   "auto_disable_filter_on_overheat": 3,
+   "auxiliary_fan": 31,
+   "box_id": 11,
+   "cooling_filter_enabled": 3,
+   "cooling_tube_length": 8,
+   "cooling_tube_retraction": 8,
+   "enable_long_retraction_when_cut": 11,
+   "extra_loading_move": 8,
+   "extruder_clearance_dist_to_rod": 11,
+   "extruder_clearance_max_radius": 11,
+   "extruder_colour": 31,
+   "extruder_max_nozzle_count": 3,
+   "fan_direction": 3,
+   "group_algo_with_time": 3,
+   "is_support_3mf": 11,
+   "is_support_air_condition": 3,
+   "is_support_mqtt": 3,
+   "is_support_timelapse": 11,
+   "machine_hotend_change_time": 3,
+   "machine_load_filament_time": 11,
+   "machine_max_acceleration_e": 31,
+   "machine_max_acceleration_retracting": 31,
+   "machine_max_acceleration_travel": 19,
+   "machine_max_acceleration_z": 31,
+   "machine_max_jerk_e": 31,
+   "machine_max_jerk_y": 31,
+   "machine_max_jerk_z": 31,
+   "machine_min_extruding_rate": 31,
+   "machine_min_travel_rate": 31,
+   "machine_switch_extruder_time": 11,
+   "machine_unload_filament_time": 11,
+   "nozzle_volume": 11,
+   "parking_pos_retraction": 8,
+   "printer_agent": 15,
+   "printer_structure": 11,
+   "printer_technology": 31,
+   "retract_restart_extra_toolchange": 31,
+   "scan_first_layer": 31,
+   "single_extruder_multi_material": 31,
+   "support_air_filtration": 11,
+   "support_box_temp_control": 11,
+   "support_cooling_filter": 3,
+   "support_multi_bed_types": 11,
+   "thumbnail_size": 11,
+   "use_3mf": 11,
+   "wipe_tower_type": 31
+  },
+  "process": {
+   "apply_top_surface_compensation": 16,
+   "avoid_crossing_wall_includes_support": 16,
+   "bottom_color_penetration_layers": 16,
+   "circle_compensation_manual_offset": 16,
+   "detect_floating_vertical_shell": 16,
+   "embedding_wall_into_infill": 16,
+   "enable_circle_compensation": 16,
+   "enable_height_slowdown": 16,
+   "enable_prime_tower": 170,
+   "enable_support_ironing": 170,
+   "enable_tower_interface_features": 170,
+   "enable_wrapping_detection": 16,
+   "filename_format": 170,
+   "infill_instead_top_bottom_surfaces": 16,
+   "infill_rotate_step": 16,
+   "infill_shift_step": 16,
+   "initial_layer_travel_acceleration": 16,
+   "interface_shells": 170,
+   "locked_skeleton_infill_pattern": 16,
+   "locked_skin_infill_pattern": 16,
+   "override_filament_scarf_seam_setting": 16,
+   "prime_tower_enable_framework": 16,
+   "prime_tower_flat_ironing": 16,
+   "prime_tower_lift_height": 16,
+   "prime_tower_lift_speed": 16,
+   "prime_tower_max_speed": 16,
+   "prime_tower_width": 170,
+   "seam_placement_away_from_overhangs": 16,
+   "seam_slope_gap": 16,
+   "slowdown_end_acc": 16,
+   "slowdown_end_height": 16,
+   "slowdown_end_speed": 16,
+   "slowdown_start_acc": 16,
+   "slowdown_start_height": 16,
+   "slowdown_start_speed": 16,
+   "smooth_speed_discontinuity_area": 16,
+   "sparse_infill_lattice_angle_1": 170,
+   "sparse_infill_lattice_angle_2": 170,
+   "standby_temperature_delta": 170,
+   "support_ironing_direction": 170,
+   "support_ironing_inset": 170,
+   "support_ironing_speed": 170,
+   "symmetric_infill_y_axis": 16,
+   "top_color_penetration_layers": 16,
+   "travel_short_distance_acceleration": 170,
+   "vertical_shell_speed": 16,
+   "wall_infill_order": 170,
+   "wipe_tower_no_sparse_layers": 170,
+   "z_direction_outwall_speed_continuous": 16
+  }
+ },
+ "hand_kits": {
+  "qidi-xmax-4": {
+   "additions": {
+    "machine": {
+     "bed_assets": true,
+     "from_orca": [
+      "thumbnails"
+     ],
+     "keys": [
+      "bed_visual_model_asset",
+      "bed_visual_model_offset_x",
+      "bed_visual_model_offset_y",
+      "bed_visual_model_offset_z",
+      "bed_visual_overlay_asset",
+      "bed_visual_overlay_enabled",
+      "thumbnails"
+     ],
+     "version": 3
+    }
+   },
+   "decision": "Д3, 07.11.2026: значения комплекта, на которых уже печатают, не меняются до сверки с Corpo4; это значения Protype, а не Orca",
+   "file": {
+    "blob": "78ea68f20bea38ffbca7ddf681c1ae009a12a303",
+    "commit": "e2462f96e6447492b197cf4b9211d50167f0d49e",
+    "path": "scripts/profiles/kits/qidi.json"
+   },
+   "presets": {
+    "extruder": "698c21b4-f1a2-432d-a808-d246520f32a5",
+    "filament": "691567e5-85d1-4788-8b01-91cfdc5bbf42",
+    "machine": "c425afad-bc30-42db-9744-c4573aae01b2",
+    "process": "607a0051-2d50-4aff-9a67-9f6d66cbd5b4"
+   },
+   "replaces": "Qidi X-Max 4 0.4 nozzle",
+   "source": {
+    "blob": "71f713761a5c9cdf66d1d4c2495fea7b021876e8",
+    "commit": "51127886f4b2285f1e7701a0ff5c87ec69fa341d",
+    "path": "apps/agent/resources/starter_profiles/presets.json",
+    "repo": "https://github.com/dinamicby/ProtypeSlicer"
+   }
+  }
+ },
+ "inputs": {
+  "libslic3r_keys_sha256": "089168214d69e0b503fd297f7f5b2181736b8575b29b713b6ecc33ea402d9c07",
+  "libslic3r_pin": "39a9077b41ced66aa90c17ef99ecf7c42517906e",
+  "schema_sha256": "394c571a57b827499a04a26e1f53768b770a3376d976eaddb7f30ea5379a931d",
+  "schema_version": 2
+ },
+ "limits": {
+  "Qidi Q1 Pro 0.2 nozzle": {
+   "machine_max_acceleration_extruding": {
+    "cfg": 20000,
+    "profile": [
+     "20000"
+    ],
+    "result": [
+     "20000"
+    ]
+   },
+   "machine_max_acceleration_travel": {
+    "cfg": 20000,
+    "profile": null,
+    "result": [
+     "20000"
+    ]
+   },
+   "machine_max_acceleration_x": {
+    "cfg": 20000,
+    "profile": [
+     "20000"
+    ],
+    "result": [
+     "20000"
+    ]
+   },
+   "machine_max_acceleration_y": {
+    "cfg": 20000,
+    "profile": [
+     "20000"
+    ],
+    "result": [
+     "20000"
+    ]
+   },
+   "machine_max_acceleration_z": {
+    "cfg": 500,
+    "profile": [
+     "500"
+    ],
+    "result": [
+     "500"
+    ]
+   },
+   "machine_max_jerk_x": {
+    "cfg": 8,
+    "profile": [
+     "8",
+     "8"
+    ],
+    "result": [
+     "8",
+     "8"
+    ]
+   },
+   "machine_max_jerk_y": {
+    "cfg": 8,
+    "profile": [
+     "8",
+     "8"
+    ],
+    "result": [
+     "8",
+     "8"
+    ]
+   },
+   "machine_max_speed_x": {
+    "cfg": 600,
+    "profile": [
+     "600"
+    ],
+    "result": [
+     "600"
+    ]
+   },
+   "machine_max_speed_y": {
+    "cfg": 600,
+    "profile": [
+     "600"
+    ],
+    "result": [
+     "600"
+    ]
+   },
+   "machine_max_speed_z": {
+    "cfg": 10,
+    "profile": [
+     "10"
+    ],
+    "result": [
+     "10"
+    ]
+   }
+  },
+  "Qidi Q1 Pro 0.4 nozzle": {
+   "machine_max_acceleration_extruding": {
+    "cfg": 20000,
+    "profile": [
+     "20000"
+    ],
+    "result": [
+     "20000"
+    ]
+   },
+   "machine_max_acceleration_travel": {
+    "cfg": 20000,
+    "profile": null,
+    "result": [
+     "20000"
+    ]
+   },
+   "machine_max_acceleration_x": {
+    "cfg": 20000,
+    "profile": [
+     "20000"
+    ],
+    "result": [
+     "20000"
+    ]
+   },
+   "machine_max_acceleration_y": {
+    "cfg": 20000,
+    "profile": [
+     "20000"
+    ],
+    "result": [
+     "20000"
+    ]
+   },
+   "machine_max_acceleration_z": {
+    "cfg": 500,
+    "profile": [
+     "500"
+    ],
+    "result": [
+     "500"
+    ]
+   },
+   "machine_max_jerk_x": {
+    "cfg": 8,
+    "profile": [
+     "8",
+     "8"
+    ],
+    "result": [
+     "8",
+     "8"
+    ]
+   },
+   "machine_max_jerk_y": {
+    "cfg": 8,
+    "profile": [
+     "8",
+     "8"
+    ],
+    "result": [
+     "8",
+     "8"
+    ]
+   },
+   "machine_max_speed_x": {
+    "cfg": 600,
+    "profile": [
+     "600"
+    ],
+    "result": [
+     "600"
+    ]
+   },
+   "machine_max_speed_y": {
+    "cfg": 600,
+    "profile": [
+     "600"
+    ],
+    "result": [
+     "600"
+    ]
+   },
+   "machine_max_speed_z": {
+    "cfg": 10,
+    "profile": [
+     "10"
+    ],
+    "result": [
+     "10"
+    ]
+   }
+  },
+  "Qidi Q1 Pro 0.6 nozzle": {
+   "machine_max_acceleration_extruding": {
+    "cfg": 20000,
+    "profile": [
+     "20000"
+    ],
+    "result": [
+     "20000"
+    ]
+   },
+   "machine_max_acceleration_travel": {
+    "cfg": 20000,
+    "profile": null,
+    "result": [
+     "20000"
+    ]
+   },
+   "machine_max_acceleration_x": {
+    "cfg": 20000,
+    "profile": [
+     "20000"
+    ],
+    "result": [
+     "20000"
+    ]
+   },
+   "machine_max_acceleration_y": {
+    "cfg": 20000,
+    "profile": [
+     "20000"
+    ],
+    "result": [
+     "20000"
+    ]
+   },
+   "machine_max_acceleration_z": {
+    "cfg": 500,
+    "profile": [
+     "500"
+    ],
+    "result": [
+     "500"
+    ]
+   },
+   "machine_max_jerk_x": {
+    "cfg": 8,
+    "profile": [
+     "8",
+     "8"
+    ],
+    "result": [
+     "8",
+     "8"
+    ]
+   },
+   "machine_max_jerk_y": {
+    "cfg": 8,
+    "profile": [
+     "8",
+     "8"
+    ],
+    "result": [
+     "8",
+     "8"
+    ]
+   },
+   "machine_max_speed_x": {
+    "cfg": 600,
+    "profile": [
+     "600"
+    ],
+    "result": [
+     "600"
+    ]
+   },
+   "machine_max_speed_y": {
+    "cfg": 600,
+    "profile": [
+     "600"
+    ],
+    "result": [
+     "600"
+    ]
+   },
+   "machine_max_speed_z": {
+    "cfg": 10,
+    "profile": [
+     "10"
+    ],
+    "result": [
+     "10"
+    ]
+   }
+  },
+  "Qidi Q1 Pro 0.8 nozzle": {
+   "machine_max_acceleration_extruding": {
+    "cfg": 20000,
+    "profile": [
+     "20000"
+    ],
+    "result": [
+     "20000"
+    ]
+   },
+   "machine_max_acceleration_travel": {
+    "cfg": 20000,
+    "profile": null,
+    "result": [
+     "20000"
+    ]
+   },
+   "machine_max_acceleration_x": {
+    "cfg": 20000,
+    "profile": [
+     "20000"
+    ],
+    "result": [
+     "20000"
+    ]
+   },
+   "machine_max_acceleration_y": {
+    "cfg": 20000,
+    "profile": [
+     "20000"
+    ],
+    "result": [
+     "20000"
+    ]
+   },
+   "machine_max_acceleration_z": {
+    "cfg": 500,
+    "profile": [
+     "500"
+    ],
+    "result": [
+     "500"
+    ]
+   },
+   "machine_max_jerk_x": {
+    "cfg": 8,
+    "profile": [
+     "8",
+     "8"
+    ],
+    "result": [
+     "8",
+     "8"
+    ]
+   },
+   "machine_max_jerk_y": {
+    "cfg": 8,
+    "profile": [
+     "8",
+     "8"
+    ],
+    "result": [
+     "8",
+     "8"
+    ]
+   },
+   "machine_max_speed_x": {
+    "cfg": 600,
+    "profile": [
+     "600"
+    ],
+    "result": [
+     "600"
+    ]
+   },
+   "machine_max_speed_y": {
+    "cfg": 600,
+    "profile": [
+     "600"
+    ],
+    "result": [
+     "600"
+    ]
+   },
+   "machine_max_speed_z": {
+    "cfg": 10,
+    "profile": [
+     "10"
+    ],
+    "result": [
+     "10"
+    ]
+   }
+  },
+  "Qidi Q2 0.2 nozzle": {
+   "machine_max_acceleration_extruding": {
+    "cfg": 20000,
+    "profile": [
+     "20000",
+     "20000"
+    ],
+    "result": [
+     "20000",
+     "20000"
+    ]
+   },
+   "machine_max_acceleration_travel": {
+    "cfg": 20000,
+    "profile": [
+     "9000",
+     "9000"
+    ],
+    "result": [
+     "9000",
+     "9000"
+    ]
+   },
+   "machine_max_acceleration_x": {
+    "cfg": 20000,
+    "profile": [
+     "20000"
+    ],
+    "result": [
+     "20000"
+    ]
+   },
+   "machine_max_acceleration_y": {
+    "cfg": 20000,
+    "profile": [
+     "20000"
+    ],
+    "result": [
+     "20000"
+    ]
+   },
+   "machine_max_acceleration_z": {
+    "cfg": 500,
+    "profile": [
+     "500"
+    ],
+    "result": [
+     "500"
+    ]
+   },
+   "machine_max_jerk_x": {
+    "cfg": 8,
+    "profile": [
+     "9",
+     "9"
+    ],
+    "result": [
+     "8",
+     "8"
+    ]
+   },
+   "machine_max_jerk_y": {
+    "cfg": 8,
+    "profile": [
+     "9",
+     "9"
+    ],
+    "result": [
+     "8",
+     "8"
+    ]
+   },
+   "machine_max_speed_x": {
+    "cfg": 600,
+    "profile": [
+     "600"
+    ],
+    "result": [
+     "600"
+    ]
+   },
+   "machine_max_speed_y": {
+    "cfg": 600,
+    "profile": [
+     "600"
+    ],
+    "result": [
+     "600"
+    ]
+   },
+   "machine_max_speed_z": {
+    "cfg": 20,
+    "profile": [
+     "20",
+     "20"
+    ],
+    "result": [
+     "20",
+     "20"
+    ]
+   }
+  },
+  "Qidi Q2 0.4 nozzle": {
+   "machine_max_acceleration_extruding": {
+    "cfg": 20000,
+    "profile": [
+     "20000",
+     "20000"
+    ],
+    "result": [
+     "20000",
+     "20000"
+    ]
+   },
+   "machine_max_acceleration_travel": {
+    "cfg": 20000,
+    "profile": [
+     "9000",
+     "9000"
+    ],
+    "result": [
+     "9000",
+     "9000"
+    ]
+   },
+   "machine_max_acceleration_x": {
+    "cfg": 20000,
+    "profile": [
+     "20000"
+    ],
+    "result": [
+     "20000"
+    ]
+   },
+   "machine_max_acceleration_y": {
+    "cfg": 20000,
+    "profile": [
+     "20000"
+    ],
+    "result": [
+     "20000"
+    ]
+   },
+   "machine_max_acceleration_z": {
+    "cfg": 500,
+    "profile": [
+     "500"
+    ],
+    "result": [
+     "500"
+    ]
+   },
+   "machine_max_jerk_x": {
+    "cfg": 8,
+    "profile": [
+     "9",
+     "9"
+    ],
+    "result": [
+     "8",
+     "8"
+    ]
+   },
+   "machine_max_jerk_y": {
+    "cfg": 8,
+    "profile": [
+     "9",
+     "9"
+    ],
+    "result": [
+     "8",
+     "8"
+    ]
+   },
+   "machine_max_speed_x": {
+    "cfg": 600,
+    "profile": [
+     "600"
+    ],
+    "result": [
+     "600"
+    ]
+   },
+   "machine_max_speed_y": {
+    "cfg": 600,
+    "profile": [
+     "600"
+    ],
+    "result": [
+     "600"
+    ]
+   },
+   "machine_max_speed_z": {
+    "cfg": 20,
+    "profile": [
+     "20",
+     "20"
+    ],
+    "result": [
+     "20",
+     "20"
+    ]
+   }
+  },
+  "Qidi Q2 0.6 nozzle": {
+   "machine_max_acceleration_extruding": {
+    "cfg": 20000,
+    "profile": [
+     "20000",
+     "20000"
+    ],
+    "result": [
+     "20000",
+     "20000"
+    ]
+   },
+   "machine_max_acceleration_travel": {
+    "cfg": 20000,
+    "profile": [
+     "9000",
+     "9000"
+    ],
+    "result": [
+     "9000",
+     "9000"
+    ]
+   },
+   "machine_max_acceleration_x": {
+    "cfg": 20000,
+    "profile": [
+     "20000"
+    ],
+    "result": [
+     "20000"
+    ]
+   },
+   "machine_max_acceleration_y": {
+    "cfg": 20000,
+    "profile": [
+     "20000"
+    ],
+    "result": [
+     "20000"
+    ]
+   },
+   "machine_max_acceleration_z": {
+    "cfg": 500,
+    "profile": [
+     "500"
+    ],
+    "result": [
+     "500"
+    ]
+   },
+   "machine_max_jerk_x": {
+    "cfg": 8,
+    "profile": [
+     "9",
+     "9"
+    ],
+    "result": [
+     "8",
+     "8"
+    ]
+   },
+   "machine_max_jerk_y": {
+    "cfg": 8,
+    "profile": [
+     "9",
+     "9"
+    ],
+    "result": [
+     "8",
+     "8"
+    ]
+   },
+   "machine_max_speed_x": {
+    "cfg": 600,
+    "profile": [
+     "600"
+    ],
+    "result": [
+     "600"
+    ]
+   },
+   "machine_max_speed_y": {
+    "cfg": 600,
+    "profile": [
+     "600"
+    ],
+    "result": [
+     "600"
+    ]
+   },
+   "machine_max_speed_z": {
+    "cfg": 20,
+    "profile": [
+     "20",
+     "20"
+    ],
+    "result": [
+     "20",
+     "20"
+    ]
+   }
+  },
+  "Qidi Q2 0.8 nozzle": {
+   "machine_max_acceleration_extruding": {
+    "cfg": 20000,
+    "profile": [
+     "20000",
+     "20000"
+    ],
+    "result": [
+     "20000",
+     "20000"
+    ]
+   },
+   "machine_max_acceleration_travel": {
+    "cfg": 20000,
+    "profile": [
+     "9000",
+     "9000"
+    ],
+    "result": [
+     "9000",
+     "9000"
+    ]
+   },
+   "machine_max_acceleration_x": {
+    "cfg": 20000,
+    "profile": [
+     "20000"
+    ],
+    "result": [
+     "20000"
+    ]
+   },
+   "machine_max_acceleration_y": {
+    "cfg": 20000,
+    "profile": [
+     "20000"
+    ],
+    "result": [
+     "20000"
+    ]
+   },
+   "machine_max_acceleration_z": {
+    "cfg": 500,
+    "profile": [
+     "500"
+    ],
+    "result": [
+     "500"
+    ]
+   },
+   "machine_max_jerk_x": {
+    "cfg": 8,
+    "profile": [
+     "9",
+     "9"
+    ],
+    "result": [
+     "8",
+     "8"
+    ]
+   },
+   "machine_max_jerk_y": {
+    "cfg": 8,
+    "profile": [
+     "9",
+     "9"
+    ],
+    "result": [
+     "8",
+     "8"
+    ]
+   },
+   "machine_max_speed_x": {
+    "cfg": 600,
+    "profile": [
+     "600"
+    ],
+    "result": [
+     "600"
+    ]
+   },
+   "machine_max_speed_y": {
+    "cfg": 600,
+    "profile": [
+     "600"
+    ],
+    "result": [
+     "600"
+    ]
+   },
+   "machine_max_speed_z": {
+    "cfg": 20,
+    "profile": [
+     "20",
+     "20"
+    ],
+    "result": [
+     "20",
+     "20"
+    ]
+   }
+  },
+  "Qidi X-Max 4 0.2 nozzle": {
+   "machine_max_acceleration_extruding": {
+    "cfg": 30000,
+    "profile": [
+     "20000",
+     "20000"
+    ],
+    "result": [
+     "20000",
+     "20000"
+    ]
+   },
+   "machine_max_acceleration_travel": {
+    "cfg": 30000,
+    "profile": [
+     "9000",
+     "9000"
+    ],
+    "result": [
+     "9000",
+     "9000"
+    ]
+   },
+   "machine_max_acceleration_x": {
+    "cfg": 30000,
+    "profile": [
+     "30000",
+     "30000"
+    ],
+    "result": [
+     "30000",
+     "30000"
+    ]
+   },
+   "machine_max_acceleration_y": {
+    "cfg": 30000,
+    "profile": [
+     "30000",
+     "30000"
+    ],
+    "result": [
+     "30000",
+     "30000"
+    ]
+   },
+   "machine_max_acceleration_z": {
+    "cfg": 500,
+    "profile": [
+     "500"
+    ],
+    "result": [
+     "500"
+    ]
+   },
+   "machine_max_jerk_x": {
+    "cfg": 8,
+    "profile": [
+     "9",
+     "9"
+    ],
+    "result": [
+     "8",
+     "8"
+    ]
+   },
+   "machine_max_jerk_y": {
+    "cfg": 8,
+    "profile": [
+     "9",
+     "9"
+    ],
+    "result": [
+     "8",
+     "8"
+    ]
+   },
+   "machine_max_speed_x": {
+    "cfg": 800,
+    "profile": [
+     "800",
+     "800"
+    ],
+    "result": [
+     "800",
+     "800"
+    ]
+   },
+   "machine_max_speed_y": {
+    "cfg": 800,
+    "profile": [
+     "800",
+     "800"
+    ],
+    "result": [
+     "800",
+     "800"
+    ]
+   },
+   "machine_max_speed_z": {
+    "cfg": 10,
+    "profile": [
+     "20",
+     "20"
+    ],
+    "result": [
+     "10",
+     "10"
+    ]
+   }
+  },
+  "Qidi X-Max 4 0.6 nozzle": {
+   "machine_max_acceleration_extruding": {
+    "cfg": 30000,
+    "profile": [
+     "20000",
+     "20000"
+    ],
+    "result": [
+     "20000",
+     "20000"
+    ]
+   },
+   "machine_max_acceleration_travel": {
+    "cfg": 30000,
+    "profile": [
+     "9000",
+     "9000"
+    ],
+    "result": [
+     "9000",
+     "9000"
+    ]
+   },
+   "machine_max_acceleration_x": {
+    "cfg": 30000,
+    "profile": [
+     "30000",
+     "30000"
+    ],
+    "result": [
+     "30000",
+     "30000"
+    ]
+   },
+   "machine_max_acceleration_y": {
+    "cfg": 30000,
+    "profile": [
+     "30000",
+     "30000"
+    ],
+    "result": [
+     "30000",
+     "30000"
+    ]
+   },
+   "machine_max_acceleration_z": {
+    "cfg": 500,
+    "profile": [
+     "500"
+    ],
+    "result": [
+     "500"
+    ]
+   },
+   "machine_max_jerk_x": {
+    "cfg": 8,
+    "profile": [
+     "9",
+     "9"
+    ],
+    "result": [
+     "8",
+     "8"
+    ]
+   },
+   "machine_max_jerk_y": {
+    "cfg": 8,
+    "profile": [
+     "9",
+     "9"
+    ],
+    "result": [
+     "8",
+     "8"
+    ]
+   },
+   "machine_max_speed_x": {
+    "cfg": 800,
+    "profile": [
+     "800",
+     "800"
+    ],
+    "result": [
+     "800",
+     "800"
+    ]
+   },
+   "machine_max_speed_y": {
+    "cfg": 800,
+    "profile": [
+     "800",
+     "800"
+    ],
+    "result": [
+     "800",
+     "800"
+    ]
+   },
+   "machine_max_speed_z": {
+    "cfg": 10,
+    "profile": [
+     "20",
+     "20"
+    ],
+    "result": [
+     "10",
+     "10"
+    ]
+   }
+  },
+  "Qidi X-Max 4 0.8 nozzle": {
+   "machine_max_acceleration_extruding": {
+    "cfg": 30000,
+    "profile": [
+     "20000",
+     "20000"
+    ],
+    "result": [
+     "20000",
+     "20000"
+    ]
+   },
+   "machine_max_acceleration_travel": {
+    "cfg": 30000,
+    "profile": [
+     "9000",
+     "9000"
+    ],
+    "result": [
+     "9000",
+     "9000"
+    ]
+   },
+   "machine_max_acceleration_x": {
+    "cfg": 30000,
+    "profile": [
+     "30000",
+     "30000"
+    ],
+    "result": [
+     "30000",
+     "30000"
+    ]
+   },
+   "machine_max_acceleration_y": {
+    "cfg": 30000,
+    "profile": [
+     "30000",
+     "30000"
+    ],
+    "result": [
+     "30000",
+     "30000"
+    ]
+   },
+   "machine_max_acceleration_z": {
+    "cfg": 500,
+    "profile": [
+     "500"
+    ],
+    "result": [
+     "500"
+    ]
+   },
+   "machine_max_jerk_x": {
+    "cfg": 8,
+    "profile": [
+     "9",
+     "9"
+    ],
+    "result": [
+     "8",
+     "8"
+    ]
+   },
+   "machine_max_jerk_y": {
+    "cfg": 8,
+    "profile": [
+     "9",
+     "9"
+    ],
+    "result": [
+     "8",
+     "8"
+    ]
+   },
+   "machine_max_speed_x": {
+    "cfg": 800,
+    "profile": [
+     "800",
+     "800"
+    ],
+    "result": [
+     "800",
+     "800"
+    ]
+   },
+   "machine_max_speed_y": {
+    "cfg": 800,
+    "profile": [
+     "800",
+     "800"
+    ],
+    "result": [
+     "800",
+     "800"
+    ]
+   },
+   "machine_max_speed_z": {
+    "cfg": 10,
+    "profile": [
+     "20",
+     "20"
+    ],
+    "result": [
+     "10",
+     "10"
+    ]
+   }
+  },
+  "Qidi X-Plus 4 0.2 nozzle": {
+   "machine_max_acceleration_extruding": {
+    "cfg": 20000,
+    "profile": [
+     "20000"
+    ],
+    "result": [
+     "20000"
+    ]
+   },
+   "machine_max_acceleration_travel": {
+    "cfg": 20000,
+    "profile": null,
+    "result": [
+     "20000"
+    ]
+   },
+   "machine_max_acceleration_x": {
+    "cfg": 20000,
+    "profile": [
+     "20000"
+    ],
+    "result": [
+     "20000"
+    ]
+   },
+   "machine_max_acceleration_y": {
+    "cfg": 20000,
+    "profile": [
+     "20000"
+    ],
+    "result": [
+     "20000"
+    ]
+   },
+   "machine_max_acceleration_z": {
+    "cfg": 500,
+    "profile": [
+     "500"
+    ],
+    "result": [
+     "500"
+    ]
+   },
+   "machine_max_jerk_x": {
+    "cfg": 8,
+    "profile": [
+     "9",
+     "9"
+    ],
+    "result": [
+     "8",
+     "8"
+    ]
+   },
+   "machine_max_jerk_y": {
+    "cfg": 8,
+    "profile": [
+     "9",
+     "9"
+    ],
+    "result": [
+     "8",
+     "8"
+    ]
+   },
+   "machine_max_speed_x": {
+    "cfg": 600,
+    "profile": [
+     "600"
+    ],
+    "result": [
+     "600"
+    ]
+   },
+   "machine_max_speed_y": {
+    "cfg": 600,
+    "profile": [
+     "600"
+    ],
+    "result": [
+     "600"
+    ]
+   },
+   "machine_max_speed_z": {
+    "cfg": 20,
+    "profile": [
+     "20",
+     "20"
+    ],
+    "result": [
+     "20",
+     "20"
+    ]
+   }
+  },
+  "Qidi X-Plus 4 0.4 nozzle": {
+   "machine_max_acceleration_extruding": {
+    "cfg": 20000,
+    "profile": [
+     "20000"
+    ],
+    "result": [
+     "20000"
+    ]
+   },
+   "machine_max_acceleration_travel": {
+    "cfg": 20000,
+    "profile": null,
+    "result": [
+     "20000"
+    ]
+   },
+   "machine_max_acceleration_x": {
+    "cfg": 20000,
+    "profile": [
+     "20000"
+    ],
+    "result": [
+     "20000"
+    ]
+   },
+   "machine_max_acceleration_y": {
+    "cfg": 20000,
+    "profile": [
+     "20000"
+    ],
+    "result": [
+     "20000"
+    ]
+   },
+   "machine_max_acceleration_z": {
+    "cfg": 500,
+    "profile": [
+     "500"
+    ],
+    "result": [
+     "500"
+    ]
+   },
+   "machine_max_jerk_x": {
+    "cfg": 8,
+    "profile": [
+     "9",
+     "9"
+    ],
+    "result": [
+     "8",
+     "8"
+    ]
+   },
+   "machine_max_jerk_y": {
+    "cfg": 8,
+    "profile": [
+     "9",
+     "9"
+    ],
+    "result": [
+     "8",
+     "8"
+    ]
+   },
+   "machine_max_speed_x": {
+    "cfg": 600,
+    "profile": [
+     "600"
+    ],
+    "result": [
+     "600"
+    ]
+   },
+   "machine_max_speed_y": {
+    "cfg": 600,
+    "profile": [
+     "600"
+    ],
+    "result": [
+     "600"
+    ]
+   },
+   "machine_max_speed_z": {
+    "cfg": 20,
+    "profile": [
+     "20",
+     "20"
+    ],
+    "result": [
+     "20",
+     "20"
+    ]
+   }
+  },
+  "Qidi X-Plus 4 0.6 nozzle": {
+   "machine_max_acceleration_extruding": {
+    "cfg": 20000,
+    "profile": [
+     "20000"
+    ],
+    "result": [
+     "20000"
+    ]
+   },
+   "machine_max_acceleration_travel": {
+    "cfg": 20000,
+    "profile": null,
+    "result": [
+     "20000"
+    ]
+   },
+   "machine_max_acceleration_x": {
+    "cfg": 20000,
+    "profile": [
+     "20000"
+    ],
+    "result": [
+     "20000"
+    ]
+   },
+   "machine_max_acceleration_y": {
+    "cfg": 20000,
+    "profile": [
+     "20000"
+    ],
+    "result": [
+     "20000"
+    ]
+   },
+   "machine_max_acceleration_z": {
+    "cfg": 500,
+    "profile": [
+     "500"
+    ],
+    "result": [
+     "500"
+    ]
+   },
+   "machine_max_jerk_x": {
+    "cfg": 8,
+    "profile": [
+     "9",
+     "9"
+    ],
+    "result": [
+     "8",
+     "8"
+    ]
+   },
+   "machine_max_jerk_y": {
+    "cfg": 8,
+    "profile": [
+     "9",
+     "9"
+    ],
+    "result": [
+     "8",
+     "8"
+    ]
+   },
+   "machine_max_speed_x": {
+    "cfg": 600,
+    "profile": [
+     "600"
+    ],
+    "result": [
+     "600"
+    ]
+   },
+   "machine_max_speed_y": {
+    "cfg": 600,
+    "profile": [
+     "600"
+    ],
+    "result": [
+     "600"
+    ]
+   },
+   "machine_max_speed_z": {
+    "cfg": 20,
+    "profile": [
+     "20",
+     "20"
+    ],
+    "result": [
+     "20",
+     "20"
+    ]
+   }
+  },
+  "Qidi X-Plus 4 0.8 nozzle": {
+   "machine_max_acceleration_extruding": {
+    "cfg": 20000,
+    "profile": [
+     "20000"
+    ],
+    "result": [
+     "20000"
+    ]
+   },
+   "machine_max_acceleration_travel": {
+    "cfg": 20000,
+    "profile": null,
+    "result": [
+     "20000"
+    ]
+   },
+   "machine_max_acceleration_x": {
+    "cfg": 20000,
+    "profile": [
+     "20000"
+    ],
+    "result": [
+     "20000"
+    ]
+   },
+   "machine_max_acceleration_y": {
+    "cfg": 20000,
+    "profile": [
+     "20000"
+    ],
+    "result": [
+     "20000"
+    ]
+   },
+   "machine_max_acceleration_z": {
+    "cfg": 500,
+    "profile": [
+     "500"
+    ],
+    "result": [
+     "500"
+    ]
+   },
+   "machine_max_jerk_x": {
+    "cfg": 8,
+    "profile": [
+     "9",
+     "9"
+    ],
+    "result": [
+     "8",
+     "8"
+    ]
+   },
+   "machine_max_jerk_y": {
+    "cfg": 8,
+    "profile": [
+     "9",
+     "9"
+    ],
+    "result": [
+     "8",
+     "8"
+    ]
+   },
+   "machine_max_speed_x": {
+    "cfg": 600,
+    "profile": [
+     "600"
+    ],
+    "result": [
+     "600"
+    ]
+   },
+   "machine_max_speed_y": {
+    "cfg": 600,
+    "profile": [
+     "600"
+    ],
+    "result": [
+     "600"
+    ]
+   },
+   "machine_max_speed_z": {
+    "cfg": 20,
+    "profile": [
+     "20",
+     "20"
+    ],
+    "result": [
+     "20",
+     "20"
+    ]
+   }
+  }
+ },
+ "limits_unverified": [
+  "qidi-q2c",
+  "qidi-xmax-3",
+  "qidi-xplus-3",
+  "qidi-xsmart-3"
+ ],
+ "per_model": {
+  "qidi-q1pro": {
+   "extruder": 4,
+   "filament": 196,
+   "machine": 4,
+   "process": 22
+  },
+  "qidi-q2": {
+   "extruder": 4,
+   "filament": 188,
+   "machine": 4,
+   "process": 22
+  },
+  "qidi-q2c": {
+   "extruder": 4,
+   "filament": 184,
+   "machine": 4,
+   "process": 22
+  },
+  "qidi-xmax-3": {
+   "extruder": 4,
+   "filament": 153,
+   "machine": 4,
+   "process": 22
+  },
+  "qidi-xmax-4": {
+   "extruder": 4,
+   "filament": 185,
+   "machine": 4,
+   "process": 17
+  },
+  "qidi-xplus-3": {
+   "extruder": 4,
+   "filament": 153,
+   "machine": 4,
+   "process": 22
+  },
+  "qidi-xplus-4": {
+   "extruder": 4,
+   "filament": 205,
+   "machine": 4,
+   "process": 22
+  },
+  "qidi-xsmart-3": {
+   "extruder": 4,
+   "filament": 153,
+   "machine": 4,
+   "process": 22
+  }
+ },
+ "rejected": {
+  "extruder": {
+   "extruder_offset": {
+    "number '0x0'": 31
+   }
+  },
+  "filament": {
+   "filament_retraction_length": {
+    "nil": 1066
+   },
+   "filament_retraction_speed": {
+    "nil": 1105
+   },
+   "nozzle_temperature_initial_layer": {
+    "дубль first_layer_temperature": 1
+   }
+  },
+  "process": {
+   "support_object_xy_distance": {
+    "percent for absolute value": 42
+   }
+  }
+ },
+ "rule_keys_outside_schema": [],
+ "rules": {
+  "clamp_toolchange_lift": [
+   "Qidi Q2 0.2 nozzle",
+   "Qidi Q2 0.4 nozzle",
+   "Qidi Q2 0.6 nozzle",
+   "Qidi Q2 0.8 nozzle",
+   "Qidi Q2C 0.2 nozzle",
+   "Qidi Q2C 0.4 nozzle",
+   "Qidi Q2C 0.6 nozzle",
+   "Qidi Q2C 0.8 nozzle",
+   "Qidi X-Max 4 0.2 nozzle",
+   "Qidi X-Max 4 0.6 nozzle",
+   "Qidi X-Max 4 0.8 nozzle",
+   "Qidi X-Plus 4 0.2 nozzle",
+   "Qidi X-Plus 4 0.4 nozzle",
+   "Qidi X-Plus 4 0.6 nozzle",
+   "Qidi X-Plus 4 0.8 nozzle"
+  ],
+  "engine_template_constants": [
+   "Qidi Q2 0.2 nozzle",
+   "Qidi Q2 0.4 nozzle",
+   "Qidi Q2 0.6 nozzle",
+   "Qidi Q2 0.8 nozzle",
+   "Qidi X-Max 4 0.2 nozzle",
+   "Qidi X-Max 4 0.6 nozzle",
+   "Qidi X-Max 4 0.8 nozzle",
+   "Qidi X-Plus 4 0.2 nozzle",
+   "Qidi X-Plus 4 0.4 nozzle",
+   "Qidi X-Plus 4 0.6 nozzle",
+   "Qidi X-Plus 4 0.8 nozzle"
+  ],
+  "limits": [
+   "Qidi Q1 Pro 0.2 nozzle",
+   "Qidi Q1 Pro 0.4 nozzle",
+   "Qidi Q1 Pro 0.6 nozzle",
+   "Qidi Q1 Pro 0.8 nozzle",
+   "Qidi Q2 0.2 nozzle",
+   "Qidi Q2 0.4 nozzle",
+   "Qidi Q2 0.6 nozzle",
+   "Qidi Q2 0.8 nozzle",
+   "Qidi X-Max 4 0.2 nozzle",
+   "Qidi X-Max 4 0.6 nozzle",
+   "Qidi X-Max 4 0.8 nozzle",
+   "Qidi X-Plus 4 0.2 nozzle",
+   "Qidi X-Plus 4 0.4 nozzle",
+   "Qidi X-Plus 4 0.6 nozzle",
+   "Qidi X-Plus 4 0.8 nozzle"
+  ],
+  "no_chamber_heater": [
+   "Qidi Q2C 0.2 nozzle",
+   "Qidi Q2C 0.4 nozzle",
+   "Qidi Q2C 0.6 nozzle",
+   "Qidi Q2C 0.8 nozzle"
+  ],
+  "nozzle_type_bimetal": [
+   "Qidi Q2 0.2 nozzle",
+   "Qidi Q2 0.4 nozzle",
+   "Qidi Q2 0.6 nozzle",
+   "Qidi Q2 0.8 nozzle",
+   "Qidi Q2C 0.2 nozzle",
+   "Qidi Q2C 0.4 nozzle",
+   "Qidi Q2C 0.6 nozzle",
+   "Qidi Q2C 0.8 nozzle"
+  ]
+ },
+ "skipped_assets": [
+  {
+   "file": "qidi_xseries_gen3_hotend.stl",
+   "model": "qidi-q1pro",
+   "reason": "hotend model"
+  },
+  {
+   "file": "X-Series_gen3_hotend.stl",
+   "model": "qidi-q2",
+   "reason": "hotend model"
+  },
+  {
+   "file": "X-Series_gen3_hotend.stl",
+   "model": "qidi-q2c",
+   "reason": "hotend model"
+  },
+  {
+   "file": "qidi_xseries_gen3_hotend.stl",
+   "model": "qidi-xmax-3",
+   "reason": "hotend model"
+  },
+  {
+   "file": "qidi_xseries_gen3_hotend.stl",
+   "model": "qidi-xmax-4",
+   "reason": "hotend model"
+  },
+  {
+   "file": "qidi_xseries_gen3_hotend.stl",
+   "model": "qidi-xplus-3",
+   "reason": "hotend model"
+  },
+  {
+   "file": "qidi_xseries_gen3_hotend.stl",
+   "model": "qidi-xplus-4",
+   "reason": "hotend model"
+  },
+  {
+   "file": "qidi_xseries_gen3_hotend.stl",
+   "model": "qidi-xsmart-3",
+   "reason": "hotend model"
+  }
+ ],
+ "source": {
+  "commit": "40ecc66f78ed72dc368e0c1ebe40d77f00cc8a19",
+  "repo": "https://github.com/OrcaSlicer/OrcaSlicer",
+  "tag": "v2.5.0"
+ },
+ "vendor_id": "qidi"
+}

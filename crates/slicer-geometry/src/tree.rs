@@ -21,12 +21,64 @@ pub const MIN_OUTLINE_POINTS: usize = 3;
 pub const MAX_OUTLINE_POINTS: usize = 1024;
 pub const MIN_SEGMENTS: u32 = 3;
 pub const MAX_SEGMENTS: u32 = 512;
+/// Largest `extrude` twist, either way: a hundred turns, enough for any
+/// thread a part carries and far short of a runaway value.
+pub const MAX_TWIST_DEG: f64 = 36_000.0;
+/// Bounds on the layers an `extrude` is cut into along its height.
+pub const MIN_DIVISIONS: u32 = 1;
+pub const MAX_DIVISIONS: u32 = 4096;
+/// Turn per layer when a twist comes without `divisions`.
+pub const DEFAULT_TWIST_STEP_DEG: f64 = 10.0;
+/// Most an outline may turn between two layers. Past it the twist stops
+/// reading as a helix: one layer of a full turn lands the top on the
+/// bottom and the result is a plain prism, with no error to say so. It is
+/// that guard and not an accuracy bound: at 20° a point 30 mm off the axis
+/// already dips 0.46 mm towards it between layers (`docs/extrude-twist.md`,
+/// «Точность»), so the caller picks the turn per layer by radius.
+pub const MAX_TWIST_PER_DIVISION_DEG: f64 = 20.0;
+/// Most an outline edge may stray from the twisted surface between two
+/// layers. One diagonal per quad joins a layer to the next, and halfway up
+/// it stands ¼·L·sin θ off the surface for an edge of length L turning θ
+/// per layer — out for one twist sign, in for the other, so a long edge
+/// either bulges or cuts across its neighbour. The mesh kernel cuts longer
+/// edges into equal pieces until each stays within this; 0.05 mm is well
+/// under one FDM line.
+pub const MAX_TWIST_EDGE_BEND_MM: f64 = 0.05;
+/// Ceiling on outline points × (divisions + 1) for one `extrude` node,
+/// counting the points after long edges are cut for a twist
+/// (`MAX_TWIST_EDGE_BEND_MM`). The side walls cost about two triangles per
+/// vertex, so one node stays within the million triangles the engine
+/// already accepts from `import`; a pattern of such nodes multiplies it.
+pub const MAX_EXTRUDE_VERTICES: usize = 500_000;
 /// Longest `source_path` or `object_id` an `import` carries, for the reason
 /// outlines have a ceiling: the node budget counts nodes and not their size.
 pub const MAX_IMPORT_REF_BYTES: usize = 4096;
 
 fn default_segments() -> u32 {
     48
+}
+
+/// Layers along the height of an `extrude`: the given number, else 1
+/// without a twist and `ceil(|twist| / DEFAULT_TWIST_STEP_DEG)` with one,
+/// kept within `MIN_DIVISIONS..=MAX_DIVISIONS`. Call it with a twist that
+/// has already passed validation, so it is finite.
+///
+/// An out-of-range value is clamped, not refused: validation refuses it
+/// first, so callers reach this with values already in range.
+pub fn extrude_divisions(twist_deg: Option<f64>, divisions: Option<u32>) -> u32 {
+    let wanted = match (divisions, twist_deg) {
+        (Some(d), _) => d,
+        (None, Some(t)) if t != 0.0 => (t.abs() / DEFAULT_TWIST_STEP_DEG).ceil() as u32,
+        (None, _) => MIN_DIVISIONS,
+    };
+    wanted.clamp(MIN_DIVISIONS, MAX_DIVISIONS)
+}
+
+/// Turn of an `extrude` outline between two of its `layers`, in degrees,
+/// either way; zero without a twist. What `check_extrude_twist` caps and
+/// what the mesh kernel cuts long edges by, so the two cannot drift apart.
+pub(crate) fn twist_per_division(twist_deg: Option<f64>, layers: u32) -> f64 {
+    twist_deg.map_or(0.0, |twist| twist.abs() / f64::from(layers))
 }
 
 /// A sweep with no angle given is a whole turn — the common case by far,
@@ -234,9 +286,18 @@ pub enum CsgNode {
     /// OpenSCAD's `linear_extrude(height) polygon(outline)`. Winding is
     /// normalized by the kernel, so either direction works. The outline
     /// may be concave; for a profile with a hole, subtract.
+    ///
+    /// `twist_deg` turns the top outline against the bottom one over the
+    /// whole height, counter-clockwise seen from +Z looking down (a
+    /// right-hand thread going up); `divisions` is the layer count along
+    /// the height. Both are left out of the JSON when unset.
     Extrude {
         outline: Vec<[f64; 2]>,
         height: f64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        twist_deg: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        divisions: Option<u32>,
     },
     /// Round the selected edges of the child with a constant radius.
     Fillet {
@@ -408,9 +469,15 @@ impl CsgNode {
                 validate_children("intersection", children, depth, nodes)
             }
             CsgNode::Hull { children } => validate_children("hull", children, depth, nodes),
-            CsgNode::Extrude { outline, height } => {
+            CsgNode::Extrude {
+                outline,
+                height,
+                twist_deg,
+                divisions,
+            } => {
                 check_outline(outline, ["outline.x", "outline.y"])?;
-                check_dimension("height", *height)
+                check_dimension("height", *height)?;
+                check_extrude_twist(outline, *twist_deg, *divisions)
             }
             CsgNode::Import {
                 source_path,
@@ -703,6 +770,10 @@ impl CsgNode {
             CsgNode::Hull { .. } | CsgNode::SurfaceRelief { .. } | CsgNode::Import { .. } => {
                 KernelNeed::MeshOnly
             }
+            // OCCT has no twisted extrude here; a zero twist is a prism.
+            CsgNode::Extrude {
+                twist_deg: Some(t), ..
+            } if *t != 0.0 => KernelNeed::MeshOnly,
             CsgNode::Fillet { .. }
             | CsgNode::Chamfer { .. }
             | CsgNode::Shell { .. }
@@ -894,6 +965,57 @@ fn check_count(value: u32) -> Result<(), GeometryError> {
             max: MAX_PATTERN_COUNT,
         })
     }
+}
+
+/// Twist, layer count, turn per layer and vertex budget of an `extrude`,
+/// in that order, so the message names the first thing to change. The
+/// budget counts the outline as the mesh kernel builds it, long edges cut
+/// for the twist (`outline::split_for_twist`).
+fn check_extrude_twist(
+    outline: &[[f64; 2]],
+    twist_deg: Option<f64>,
+    divisions: Option<u32>,
+) -> Result<(), GeometryError> {
+    if let Some(twist) = twist_deg {
+        check_finite("twist_deg", twist)?;
+        if twist.abs() > MAX_TWIST_DEG {
+            return Err(GeometryError::Twist {
+                value: twist,
+                max: MAX_TWIST_DEG,
+            });
+        }
+    }
+    if let Some(value) = divisions {
+        if !(MIN_DIVISIONS..=MAX_DIVISIONS).contains(&value) {
+            return Err(GeometryError::Divisions {
+                value,
+                min: MIN_DIVISIONS,
+                max: MAX_DIVISIONS,
+            });
+        }
+    }
+    let layers = extrude_divisions(twist_deg, divisions);
+    let per_division = twist_per_division(twist_deg, layers);
+    if let Some(twist) = twist_deg {
+        if per_division > MAX_TWIST_PER_DIVISION_DEG {
+            return Err(GeometryError::TwistTooCoarse {
+                per_division,
+                max: MAX_TWIST_PER_DIVISION_DEG,
+                needed: (twist.abs() / MAX_TWIST_PER_DIVISION_DEG).ceil() as u32,
+            });
+        }
+    }
+    // Counted, not built: a hostile outline of long edges would split into
+    // tens of millions of points before this refused it.
+    let points = crate::outline::split_for_twist_len(outline, per_division);
+    let vertices = points.saturating_mul(layers as usize + 1);
+    if vertices > MAX_EXTRUDE_VERTICES {
+        return Err(GeometryError::ExtrudeTooDense {
+            vertices,
+            max: MAX_EXTRUDE_VERTICES,
+        });
+    }
+    Ok(())
 }
 
 fn check_finite(field: &'static str, value: f64) -> Result<(), GeometryError> {

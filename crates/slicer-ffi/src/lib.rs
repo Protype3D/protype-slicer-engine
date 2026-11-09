@@ -18,7 +18,9 @@
 pub mod brep;
 mod calibration_test;
 mod default_preset;
+pub mod gcode_header;
 mod idex;
+mod preview;
 
 // cxx 1.0.194 derives Clone by cloning every field of non-Copy structs,
 // including scalars. Rust 1.99 lints those generated calls; keep the allowance
@@ -129,6 +131,15 @@ mod ffi_bridge {
         speed_step: f64,
     }
 
+    /// Scene snapshot for the G-code thumbnails: RGBA8, first row on top.
+    /// `width == 0`: no snapshot.
+    #[derive(Debug, Clone)]
+    struct BridgeScenePreview {
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+    }
+
     #[derive(Debug, Clone)]
     struct BridgeProcessSettings {
         layer_height: f32,
@@ -184,6 +195,12 @@ mod ffi_bridge {
         // seam_facets_rle, support_facets_rle, layer_height_profile,
         // layer_ranges, object_overrides.
         objects: Vec<BridgeObjectInputs>,
+        // Validated producer line for the G-code header; never empty.
+        producer_line: String,
+        preview: BridgeScenePreview,
+        // true: the machine is a Bambu one and keeps the Bambu keys of the
+        // built-in preset.
+        is_bbl_machine: bool,
     }
 
     /// Per-slot extruder inputs. Length of every populated Vec must equal
@@ -385,6 +402,16 @@ mod ffi_bridge {
         skipped_ops: Vec<BridgeSkippedOp>,
     }
 
+    extern "Rust" {
+        /// The snapshot scaled to `width` x `height`, RGBA rows bottom-up, as
+        /// Orca's `ThumbnailData` takes them; empty when unusable.
+        fn preview_thumbnail_bottom_up(
+            preview: &BridgeScenePreview,
+            width: u32,
+            height: u32,
+        ) -> Vec<u8>;
+    }
+
     unsafe extern "C++" {
         include!("slicer-ffi/cpp/protype_slicer_bridge.h");
 
@@ -574,6 +601,8 @@ pub use ffi_bridge::{
     BridgeBbox, BridgeObjectTransform, BridgeProcessSettings, BridgeSliceOutcome,
 };
 pub use idex::IdexInputs;
+use preview::{bridge_preview, preview_thumbnail_bottom_up};
+pub use preview::{PreviewError, ScenePreview, MAX_PREVIEW_DIMENSION};
 
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -669,6 +698,17 @@ pub struct ObjectInputs {
     pub object_overrides: Vec<ConfigOverride>,
 }
 
+/// What a caller says about the file beyond the slice itself. The default is
+/// what `slice.estimate` and the CLI send.
+#[derive(Debug, Clone, Default)]
+pub struct SliceContext {
+    /// Line written under the generation banner; `None` = the engine's own.
+    pub producer_line: Option<String>,
+    /// Scene snapshot the thumbnails are made from; `None` = no thumbnails.
+    pub preview: Option<ScenePreview>,
+    pub is_bbl_machine: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct SliceParams<'a> {
     pub output_path: &'a str,
@@ -722,6 +762,7 @@ pub struct SliceParams<'a> {
     /// Optional IDEX per-slot inputs. `None` preserves the existing
     /// single-extruder path.
     pub idex: Option<IdexInputs>,
+    pub context: SliceContext,
 }
 
 #[derive(Debug, Clone)]
@@ -1103,6 +1144,21 @@ pub fn run_slice(p: SliceParams<'_>) -> SliceResult {
     // in C++ and is re-initialised per slice anyway.
     let _serialized = SLICE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
+    let producer_line = match gcode_header::producer_line(p.context.producer_line.as_deref()) {
+        Ok(line) => line,
+        Err(e) => {
+            return SliceResult {
+                success: false,
+                canceled: false,
+                error_message: format!("invalid producer_line: {e}"),
+                total_layers: 0,
+                total_segments: 0,
+                suggested_filename: String::new(),
+                warnings: Vec::new(),
+            }
+        }
+    };
+
     // libslic3r loads presets only from files. Staged under SLICE_LOCK and
     // kept alive until the bridge returns.
     let staged_preset = match default_preset::StagedPreset::stage_in(&std::env::temp_dir()) {
@@ -1197,6 +1253,9 @@ pub fn run_slice(p: SliceParams<'_>) -> SliceResult {
         place_plate_on_bed: p.place_plate_on_bed,
         calib_test: bridge_calib_test(p.calibration_test.as_ref()),
         objects,
+        producer_line,
+        preview: bridge_preview(p.context.preview.as_ref()),
+        is_bbl_machine: p.context.is_bbl_machine,
     };
     let idex = if let Some(ref i) = p.idex {
         i.assert_slot_lengths();
@@ -1362,8 +1421,54 @@ mod tests {
             }],
             cancel: None,
             idex: None,
+            context: SliceContext::default(),
         };
         assert!(p.idex.is_none(), "default IDEX is None == single extruder");
+    }
+
+    #[test]
+    fn run_slice_refuses_a_producer_line_with_a_line_break() {
+        let params = SliceParams {
+            output_path: "/tmp/x.gcode",
+            layer_height: 0.2,
+            wall_loops: 0,
+            sparse_infill_density_pct: -1.0,
+            sparse_infill_pattern: String::new(),
+            enable_support: false,
+            print_speed_mm_s: 0.0,
+            top_shell_thickness_mm: 0.0,
+            wall_generator: String::new(),
+            config_overrides: Vec::new(),
+            bbox_min: [0.0; 3],
+            bbox_max: [10.0; 3],
+            place_plate_on_bed: false,
+            calibration_test: None,
+            objects: vec![ObjectInputs {
+                input_path: "x.stl".to_string(),
+                part_index: -1,
+                object_transform: IDENTITY_OBJECT_TRANSFORM,
+                seam_facets_rle: String::new(),
+                support_facets_rle: String::new(),
+                fan_facets_rle: None,
+                filament_facets_rle: None,
+                layer_height_profile: Vec::new(),
+                layer_ranges: Vec::new(),
+                object_overrides: Vec::new(),
+            }],
+            cancel: None,
+            idex: None,
+            context: SliceContext {
+                producer_line: Some("Protype Slicer 1\nG28".into()),
+                ..SliceContext::default()
+            },
+        };
+        let r = run_slice(params);
+        assert!(!r.success);
+        assert!(
+            r.error_message.contains("invalid producer_line"),
+            "{}",
+            r.error_message
+        );
     }
 
     #[cfg(feature = "with-libslic3r")]
@@ -1480,6 +1585,7 @@ mod tests {
                 retract_restart_extra: vec![0.08],
                 ..IdexInputs::empty_for_count(1)
             }),
+            context: SliceContext::default(),
         });
         assert!(r.success, "slice failed: {}", r.error_message);
 
@@ -1722,6 +1828,7 @@ mod tests {
             }],
             cancel: None,
             idex: None,
+            context: SliceContext::default(),
         });
 
         assert!(
@@ -1862,6 +1969,7 @@ mod tests {
                 extruder_offset_xy: vec![[0.0, 0.0], [18.0, 0.0]],
                 ..IdexInputs::empty_for_count(2)
             }),
+            context: SliceContext::default(),
         });
 
         assert!(
@@ -2011,6 +2119,7 @@ mod tests {
                 extruder_offset_xy: vec![[0.0, 0.0], [18.0, 0.0]],
                 ..IdexInputs::empty_for_count(2)
             }),
+            context: SliceContext::default(),
         });
         assert!(
             r.success,
@@ -2031,15 +2140,51 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// `; generated by OrcaSlicer <d.d.d> on <dddd>-<dd>-<dd> at <dd>:<dd>:<dd>`,
+    /// parsed by hand so the crate needs no regex dependency.
     #[cfg(feature = "with-libslic3r")]
-    #[test]
-    fn libslic3r_gcode_header_uses_protype_slicer_brand() {
+    fn is_orca_banner(line: &str) -> bool {
+        fn digits(s: &str, n: usize) -> bool {
+            s.len() == n && s.bytes().all(|b| b.is_ascii_digit())
+        }
+        let Some(rest) = line.strip_prefix("; generated by OrcaSlicer ") else {
+            return false;
+        };
+        let Some((version, stamp)) = rest.split_once(" on ") else {
+            return false;
+        };
+        let parts: Vec<&str> = version.split('.').collect();
+        let version_ok = parts.len() == 3
+            && parts
+                .iter()
+                .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+        let Some((date, time)) = stamp.split_once(" at ") else {
+            return false;
+        };
+        let date: Vec<&str> = date.split('-').collect();
+        let time: Vec<&str> = time.split(':').collect();
+        version_ok
+            && date.len() == 3
+            && digits(date[0], 4)
+            && digits(date[1], 2)
+            && digits(date[2], 2)
+            && time.len() == 3
+            && time.iter().all(|t| digits(t, 2))
+    }
+
+    /// Slices the fixture into a fresh temp directory and returns the file.
+    #[cfg(feature = "with-libslic3r")]
+    fn slice_fixture_with(
+        tag: &str,
+        context: SliceContext,
+        config_overrides: Vec<ConfigOverride>,
+    ) -> Option<String> {
         let stl = fixture_stl();
         if !stl.exists() {
-            return;
+            return None;
         }
         let dir = std::env::temp_dir().join(format!(
-            "ffi-protype-header-{}",
+            "ffi-{tag}-{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
@@ -2058,7 +2203,7 @@ mod tests {
             print_speed_mm_s: 0.0,
             top_shell_thickness_mm: 0.0,
             wall_generator: String::new(),
-            config_overrides: Vec::new(),
+            config_overrides,
             bbox_min: [0.0; 3],
             bbox_max: [256.0, 256.0, 250.0],
             place_plate_on_bed: false,
@@ -2077,20 +2222,59 @@ mod tests {
             }],
             cancel: None,
             idex: None,
+            context,
         });
         assert!(r.success, "{}", r.error_message);
-
         let body = std::fs::read_to_string(&out).unwrap();
-        let header = body.lines().take(8).collect::<Vec<_>>().join("\n");
-        assert!(
-            header.contains("; generated by Protype Slicer "),
-            "G-code header should be branded as Protype Slicer, got:\n{header}"
-        );
-        assert!(
-            !header.contains("OrcaSlicer"),
-            "G-code header should not expose OrcaSlicer branding, got:\n{header}"
-        );
         std::fs::remove_dir_all(&dir).ok();
+        Some(body)
+    }
+
+    #[cfg(feature = "with-libslic3r")]
+    #[test]
+    fn libslic3r_gcode_header_names_orca_then_protype_slicer() {
+        let Some(body) = slice_fixture_with("orca-header", SliceContext::default(), Vec::new())
+        else {
+            return;
+        };
+        let lines: Vec<&str> = body.lines().take(3).collect();
+        assert_eq!(lines[0], "; HEADER_BLOCK_START");
+        assert!(is_orca_banner(lines[1]), "{}", lines[1]);
+        assert!(!lines[1].contains("1970-01-01"), "{}", lines[1]);
+        assert_eq!(
+            lines[2],
+            format!("; {}", gcode_header::DEFAULT_PRODUCER_LINE)
+        );
+        assert!(!body.contains("; generated by Protype Slicer"));
+
+        let Some(second) = slice_fixture_with(
+            "orca-header-named",
+            SliceContext {
+                producer_line: Some("Protype Slicer 0.1.38".into()),
+                ..SliceContext::default()
+            },
+            Vec::new(),
+        ) else {
+            return;
+        };
+        assert_eq!(second.lines().nth(2), Some("; Protype Slicer 0.1.38"));
+    }
+
+    #[cfg(feature = "with-libslic3r")]
+    #[test]
+    fn btt_tft_thumbnails_leave_neither_header_nor_producer_line() {
+        let Some(body) = slice_fixture_with(
+            "btt-header",
+            SliceContext::default(),
+            vec![ConfigOverride {
+                key: "thumbnails".into(),
+                value: "48x48/BTT_TFT".into(),
+            }],
+        ) else {
+            return;
+        };
+        assert!(!body.contains("; HEADER_BLOCK_START"));
+        assert!(!body.contains("; Protype Slicer "));
     }
 
     #[cfg(feature = "with-libslic3r")]
@@ -2153,6 +2337,7 @@ mod tests {
                 nozzle_diameter: vec![0.4, 0.4],
                 ..IdexInputs::empty_for_count(2)
             }),
+            context: SliceContext::default(),
         });
         assert!(r.success, "{}", r.error_message);
 
@@ -2220,6 +2405,7 @@ mod tests {
                 nozzle_diameter: vec![0.4, 0.6],
                 ..IdexInputs::empty_for_count(2)
             }),
+            context: SliceContext::default(),
         });
         assert!(r.success, "{}", r.error_message);
 
@@ -2299,6 +2485,7 @@ mod tests {
                 bed_temperature: vec![55, 70],
                 ..IdexInputs::empty_for_count(2)
             }),
+            context: SliceContext::default(),
         });
         assert!(r.success, "{}", r.error_message);
 
@@ -2380,6 +2567,7 @@ mod tests {
                 change_filament_gcode: "T{next_extruder} ; protype-tc-marker".to_string(),
                 ..IdexInputs::empty_for_count(2)
             }),
+            context: SliceContext::default(),
         });
         assert!(r.success, "{}", r.error_message);
         let body = std::fs::read_to_string(&out).unwrap();
@@ -2464,6 +2652,7 @@ mod tests {
             }],
             cancel: Some(cancel),
             idex: None,
+            context: SliceContext::default(),
         });
         assert!(!r.success, "pre-canceled slice must not report success");
         assert!(r.canceled, "outcome must flag canceled=true");
@@ -2514,6 +2703,7 @@ mod tests {
             }],
             cancel: None,
             idex: None,
+            context: SliceContext::default(),
         });
         assert!(r.success, "slice failed: {}", r.error_message);
         // 20mm tall at 0.4mm = 50 layers.
@@ -2579,6 +2769,7 @@ mod tests {
             }],
             cancel: Some(cancel),
             idex: None,
+            context: SliceContext::default(),
         });
         // Under both the stub and libslic3r paths the slice either
         // succeeds or fails for reasons unrelated to seam_facets_rle
@@ -2634,6 +2825,7 @@ mod tests {
             }],
             cancel: None,
             idex: None,
+            context: SliceContext::default(),
         });
         assert!(r.success, "slice failed: {}", r.error_message);
 
@@ -2689,6 +2881,7 @@ mod tests {
             }],
             cancel: None,
             idex: None,
+            context: SliceContext::default(),
         });
         if r.success {
             let body = std::fs::read_to_string(&out).expect("g-code file should exist");
@@ -2744,6 +2937,7 @@ mod tests {
             }],
             cancel: None,
             idex: None,
+            context: SliceContext::default(),
         });
         // The field is accepted at the type level; success/failure depends
         // on stub-vs-libslic3r build, not on this field.
@@ -2796,6 +2990,7 @@ mod tests {
             }],
             cancel: None,
             idex: None,
+            context: SliceContext::default(),
         });
         assert!(r.success, "expected slice to succeed");
         let body = std::fs::read_to_string(&out).expect("g-code file should exist");
@@ -2854,6 +3049,7 @@ mod tests {
             objects: vec![object],
             cancel: None,
             idex: None,
+            context: SliceContext::default(),
         });
         assert!(r.success, "slice failed: {}", r.error_message);
         let body = std::fs::read_to_string(&out).expect("g-code file should exist");

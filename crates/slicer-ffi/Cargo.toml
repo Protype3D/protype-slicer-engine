@@ -23,6 +23,7 @@ with-libslic3r = ["dep:slicer-geometry"]
 [dependencies]
 cxx = { workspace = true }
 serde = { workspace = true }
+png = { workspace = true }
 slicer-geometry = { path = "../slicer-geometry", optional = true }
 
 [dev-dependencies]

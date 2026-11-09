@@ -1,0 +1,146 @@
+{
+ "defs": [
+  {
+   "key": "nozzle_type",
+   "libslic3r_enum_map": {
+    "ruby": "hardened_steel",
+    "tungsten": "hardened_steel"
+   },
+   "scope": "Extruder"
+  },
+  {
+   "key": "retract_lift_enforce",
+   "libslic3r_enum_map": {
+    "all_surfaces": "All Surfaces",
+    "bottom_only": "Bottom Only",
+    "top_and_bottom": "Top and Bottom",
+    "top_only": "Top Only"
+   },
+   "scope": "Extruder"
+  },
+  {
+   "key": "z_hop_types",
+   "libslic3r_enum_map": {
+    "auto": "Auto Lift",
+    "none": "Normal Lift",
+    "normal": "Normal Lift",
+    "slope": "Slope Lift",
+    "spiral": "Spiral Lift"
+   },
+   "scope": "Extruder"
+  },
+  {
+   "key": "bed_temperature_initial_layer",
+   "libslic3r_key": "first_layer_bed_temperature",
+   "scope": "Filament"
+  },
+  {
+   "key": "bed_temperature_normal",
+   "libslic3r_key": "bed_temperature",
+   "scope": "Filament"
+  },
+  {
+   "key": "chamber_temperature_target",
+   "libslic3r_key": "chamber_temperature",
+   "scope": "Filament"
+  },
+  {
+   "key": "fan_disable_first_n_layers",
+   "libslic3r_key": "close_fan_the_first_x_layers",
+   "scope": "Filament"
+  },
+  {
+   "key": "filament_flow_ratio",
+   "libslic3r_key": "extrusion_multiplier",
+   "scope": "Filament"
+  },
+  {
+   "key": "filament_min_layer_time",
+   "libslic3r_key": "slowdown_below_layer_time",
+   "scope": "Filament"
+  },
+  {
+   "key": "filament_min_layer_time_strategy",
+   "libslic3r_key": "min_layer_time_strategy",
+   "scope": "Filament"
+  },
+  {
+   "key": "filament_park_and_wait_retract_length",
+   "libslic3r_key": "park_and_wait_retract_length",
+   "scope": "Filament"
+  },
+  {
+   "key": "filament_park_and_wait_z_hop",
+   "libslic3r_key": "park_and_wait_z_hop",
+   "scope": "Filament"
+  },
+  {
+   "key": "filament_retraction_length",
+   "libslic3r_key": "filament_retract_length",
+   "scope": "Filament"
+  },
+  {
+   "key": "filament_retraction_speed",
+   "libslic3r_key": "filament_retract_speed",
+   "scope": "Filament"
+  },
+  {
+   "key": "filament_type",
+   "libslic3r_enum_map": {
+    "ABS-CF": "ABS",
+    "ASA-CF": "ASA"
+   },
+   "scope": "Filament"
+  },
+  {
+   "key": "max_volumetric_speed",
+   "libslic3r_key": "filament_max_volumetric_speed",
+   "scope": "Filament"
+  },
+  {
+   "key": "nozzle_temperature_initial_layer",
+   "libslic3r_key": "first_layer_temperature",
+   "scope": "Filament"
+  },
+  {
+   "key": "nozzle_temperature_normal",
+   "libslic3r_key": "temperature",
+   "scope": "Filament"
+  },
+  {
+   "key": "gcode_flavor",
+   "libslic3r_enum_map": {
+    "reprap": "reprapfirmware"
+   },
+   "scope": "Machine"
+  },
+  {
+   "key": "gcode_resolution",
+   "libslic3r_key": "resolution",
+   "scope": "Process"
+  },
+  {
+   "key": "initial_layer_height",
+   "libslic3r_key": "initial_layer_print_height",
+   "scope": "Process"
+  },
+  {
+   "key": "ironing_type",
+   "libslic3r_enum_map": {
+    "all_solid": "solid",
+    "none": "no ironing"
+   },
+   "scope": "Process"
+  },
+  {
+   "key": "print_sequence",
+   "libslic3r_enum_map": {
+    "by_layer": "by layer",
+    "by_object": "by object"
+   },
+   "scope": "Process"
+  }
+ ],
+ "schema_sha256": "394c571a57b827499a04a26e1f53768b770a3376d976eaddb7f30ea5379a931d",
+ "source": "Slicer apps/agent/src/profile/dto.rs: apply_libslic3r_aliases + apply_libslic3r_enum_values"
+}

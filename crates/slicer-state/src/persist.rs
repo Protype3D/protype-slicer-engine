@@ -36,8 +36,10 @@ struct VersionFile {
     machine_id_hash: Option<String>,
 }
 
+/// `Protype/project.json`: the whole project state in its on-disk form. The
+/// autosave keeps the base a session restores in the same form.
 #[derive(Debug, Serialize, Deserialize)]
-struct ProjectFile {
+pub(crate) struct ProjectFile {
     meta: Option<ProjectMeta>,
     presets: PresetState,
     objects: Vec<SerializedObject>,
@@ -164,54 +166,29 @@ pub fn save(path: &Path, project: &ProjectState) -> Result<()> {
         zip.write_all(&serde_json::to_vec_pretty(&version)?)?;
 
         // Protype/project.json
-        let project_file = ProjectFile {
-            meta: project.meta.clone(),
-            presets: project.presets.clone(),
-            objects: project
-                .objects
-                .values()
-                .map(|o| SerializedObject {
-                    recipe: o.recipe.clone(),
-                    id: o.id.clone(),
-                    name: o.name.clone(),
-                    source_path: o.source_path.clone(),
-                    source_hash: o.source_hash.clone(),
-                    triangle_count: o.triangle_count,
-                    bounds: o.bounds.clone(),
-                    transform: o.transform,
-                    overrides: o.overrides.clone(),
-                    seam_facets_rle: o.seam_facets_rle.clone(),
-                    seam_target_point: o.seam_target_point.clone(),
-                    support_facets_rle: o.support_facets_rle.clone(),
-                    fan_facets_rle: o.fan_facets_rle.clone(),
-                    filament_facets_rle: o.filament_facets_rle.clone(),
-                    layer_height_profile: o.layer_height_profile.clone(),
-                    layer_ranges: o.layer_ranges.clone(),
-                    step_part_index: o.step_part_index,
-                    operations: o.operations.clone(),
-                    body: o.body.clone(),
-                })
-                .collect(),
-            settings: project
-                .settings
-                .iter()
-                .map(|((scope, key), value)| SerializedSetting {
-                    scope: *scope,
-                    key: key.clone(),
-                    value: value.clone(),
-                })
-                .collect(),
-            preset_library: project.preset_library.values().cloned().collect(),
-            adaptive_rules: project.adaptive_rules.clone(),
-            parts: project.parts.values().cloned().collect(),
-        };
         zip.start_file(PROTYPE_PROJECT_FILE, opts)?;
-        zip.write_all(&serde_json::to_vec_pretty(&project_file)?)?;
+        zip.write_all(&serde_json::to_vec_pretty(&ProjectFile::from_state(
+            project,
+        ))?)?;
 
-        zip.finish()?;
+        let file = zip.finish()?;
+        // Best effort: F_FULLFSYNC fails on some network and FUSE mounts, and
+        // a save there must still work as it did before syncing existed.
+        if let Err(e) = file.sync_all() {
+            tracing::warn!(?e, path = %tmp.display(), "project file sync failed; saving unsynced");
+        }
     }
     std::fs::rename(&tmp, path)
         .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
+    // The file is already replaced: a failed directory sync must not report
+    // a save that happened as failed.
+    let dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    if let Err(e) = crate::autosave::sync_directory(dir) {
+        tracing::warn!(?e, dir = %dir.display(), "project directory sync failed after save");
+    }
     Ok(())
 }
 
@@ -244,57 +221,106 @@ pub fn load(path: &Path) -> Result<ProjectState> {
 
     let project_file: ProjectFile = read_json(&mut zip, PROTYPE_PROJECT_FILE)
         .context("missing or invalid Protype/project.json")?;
+    project_file.into_state()
+}
 
-    let mut state = ProjectState {
-        meta: project_file.meta,
-        presets: project_file.presets,
-        objects: BTreeMap::new(),
-        settings: HashMap::new(),
-        preset_library: HashMap::new(),
-        adaptive_rules: project_file.adaptive_rules,
-        parts: project_file
-            .parts
-            .into_iter()
-            .map(|part| (part.part_id.clone(), part))
-            .collect(),
-    };
-    for o in project_file.objects {
-        let name = display_name(&o.name, &o.source_path);
-        if let Some(recipe) = &o.recipe {
-            crate::project::validate_recipe(recipe).map_err(|e| anyhow!(e))?;
+impl ProjectFile {
+    pub(crate) fn from_state(project: &ProjectState) -> Self {
+        Self {
+            meta: project.meta.clone(),
+            presets: project.presets.clone(),
+            objects: project
+                .objects
+                .values()
+                .map(|o| SerializedObject {
+                    recipe: o.recipe.clone(),
+                    filament_facets_rle: o.filament_facets_rle.clone(),
+                    id: o.id.clone(),
+                    name: o.name.clone(),
+                    source_path: o.source_path.clone(),
+                    source_hash: o.source_hash.clone(),
+                    triangle_count: o.triangle_count,
+                    bounds: o.bounds.clone(),
+                    transform: o.transform,
+                    overrides: o.overrides.clone(),
+                    seam_facets_rle: o.seam_facets_rle.clone(),
+                    seam_target_point: o.seam_target_point.clone(),
+                    support_facets_rle: o.support_facets_rle.clone(),
+                    fan_facets_rle: o.fan_facets_rle.clone(),
+                    layer_height_profile: o.layer_height_profile.clone(),
+                    layer_ranges: o.layer_ranges.clone(),
+                    step_part_index: o.step_part_index,
+                    operations: o.operations.clone(),
+                    body: o.body.clone(),
+                })
+                .collect(),
+            settings: project
+                .settings
+                .iter()
+                .map(|((scope, key), value)| SerializedSetting {
+                    scope: *scope,
+                    key: key.clone(),
+                    value: value.clone(),
+                })
+                .collect(),
+            preset_library: project.preset_library.values().cloned().collect(),
+            adaptive_rules: project.adaptive_rules.clone(),
+            parts: project.parts.values().cloned().collect(),
         }
-        state.objects.insert(
-            o.id.clone(),
-            ObjectRecord {
-                recipe: o.recipe,
-                id: o.id,
-                name,
-                source_path: o.source_path,
-                source_hash: o.source_hash,
-                triangle_count: o.triangle_count,
-                bounds: o.bounds,
-                transform: o.transform,
-                overrides: o.overrides,
-                seam_facets_rle: o.seam_facets_rle,
-                seam_target_point: o.seam_target_point,
-                support_facets_rle: o.support_facets_rle,
-                fan_facets_rle: o.fan_facets_rle,
-                filament_facets_rle: o.filament_facets_rle,
-                layer_height_profile: o.layer_height_profile,
-                layer_ranges: o.layer_ranges,
-                step_part_index: o.step_part_index,
-                operations: o.operations,
-                body: o.body,
-            },
-        );
     }
-    for s in project_file.settings {
-        state.settings.insert((s.scope, s.key), s.value);
+
+    pub(crate) fn into_state(self) -> Result<ProjectState> {
+        let mut state = ProjectState {
+            meta: self.meta,
+            presets: self.presets,
+            objects: BTreeMap::new(),
+            settings: HashMap::new(),
+            preset_library: HashMap::new(),
+            adaptive_rules: self.adaptive_rules,
+            parts: self
+                .parts
+                .into_iter()
+                .map(|part| (part.part_id.clone(), part))
+                .collect(),
+        };
+        for o in self.objects {
+            if let Some(recipe) = &o.recipe {
+                crate::project::validate_recipe(recipe).map_err(|e| anyhow!(e))?;
+            }
+            let name = display_name(&o.name, &o.source_path);
+            state.objects.insert(
+                o.id.clone(),
+                ObjectRecord {
+                    recipe: o.recipe,
+                    filament_facets_rle: o.filament_facets_rle,
+                    id: o.id,
+                    name,
+                    source_path: o.source_path,
+                    source_hash: o.source_hash,
+                    triangle_count: o.triangle_count,
+                    bounds: o.bounds,
+                    transform: o.transform,
+                    overrides: o.overrides,
+                    seam_facets_rle: o.seam_facets_rle,
+                    seam_target_point: o.seam_target_point,
+                    support_facets_rle: o.support_facets_rle,
+                    fan_facets_rle: o.fan_facets_rle,
+                    layer_height_profile: o.layer_height_profile,
+                    layer_ranges: o.layer_ranges,
+                    step_part_index: o.step_part_index,
+                    operations: o.operations,
+                    body: o.body,
+                },
+            );
+        }
+        for s in self.settings {
+            state.settings.insert((s.scope, s.key), s.value);
+        }
+        for p in self.preset_library {
+            state.preset_library.insert(p.id.clone(), p);
+        }
+        Ok(state)
     }
-    for p in project_file.preset_library {
-        state.preset_library.insert(p.id.clone(), p);
-    }
-    Ok(state)
 }
 
 fn read_json<R: Read + std::io::Seek, T: for<'de> Deserialize<'de>>(

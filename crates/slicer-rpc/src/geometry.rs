@@ -301,7 +301,7 @@ fn build_with_best_kernel(
 
     let declined = if need == slicer_geometry::KernelNeed::MeshOnly {
         BrepFailure::Refused(
-            "the tree contains a mesh-only operation (`hull`, `surface_relief` or `import`)"
+            "the tree contains a mesh-only operation (`hull`, `surface_relief`, `import` or a twisted `extrude`)"
                 .to_string(),
         )
     } else {

@@ -33,9 +33,11 @@ pub use section::{section_at_z, Section};
 pub use stl::to_binary_stl;
 pub use thickness::wall_thickness;
 pub use tree::{
-    brep_islands, kernel_need, Axis, CsgNode, EdgeSelector, KernelNeed, LoftSection, OpenFace,
-    MAX_DEPTH, MAX_DIMENSION_MM, MAX_IMPORT_REF_BYTES, MAX_NODES, MAX_OUTLINE_POINTS,
-    MAX_PATTERN_COUNT, MAX_SEGMENTS, MIN_LOFT_SECTIONS, MIN_OUTLINE_POINTS, MIN_SEGMENTS,
+    brep_islands, extrude_divisions, kernel_need, Axis, CsgNode, EdgeSelector, KernelNeed,
+    LoftSection, OpenFace, DEFAULT_TWIST_STEP_DEG, MAX_DEPTH, MAX_DIMENSION_MM, MAX_DIVISIONS,
+    MAX_EXTRUDE_VERTICES, MAX_IMPORT_REF_BYTES, MAX_NODES, MAX_OUTLINE_POINTS, MAX_PATTERN_COUNT,
+    MAX_SEGMENTS, MAX_TWIST_DEG, MAX_TWIST_EDGE_BEND_MM, MAX_TWIST_PER_DIVISION_DEG, MIN_DIVISIONS,
+    MIN_LOFT_SECTIONS, MIN_OUTLINE_POINTS, MIN_SEGMENTS,
 };
 
 /// A finished part: the STL bytes plus the facts the RPC layer needs for

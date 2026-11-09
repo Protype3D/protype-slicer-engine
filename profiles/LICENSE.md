@@ -49,8 +49,8 @@ community.
 ## Compatibility with this repository
 
 `protype-slicer-daemon` is licensed `AGPL-3.0-or-later` (matching libslic3r
-upstream). Redistributing OrcaSlicer profiles unmodified under the same
-license is compatible — no relicensing is involved.
+upstream). Redistributing the flat OrcaSlicer presets above (the three `profiles/*.json`
+files) unmodified under the same license is compatible — no relicensing is involved.
 
 ## How to regenerate
 
@@ -96,3 +96,74 @@ more conservative here than QIDI's own slicer, which ships 50 mm/s retraction an
 Klipper `max_accel: 30000`). Overrides are applied after the merge and recorded in
 the output's `protype_source_overrides` key, so the file stays reproducible from
 this command alone.
+
+## `catalog/`
+
+Catalogs under `catalog/<vendor>/` are written by `scripts/profiles/generate.py`;
+they are not edited by hand.
+
+- Source: OrcaSlicer tag `v2.5.0`, commit `40ecc66f78ed72dc368e0c1ebe40d77f00cc8a19`
+  (`resources/profiles/Qidi/` and `resources/profiles/Qidi.json`), licensed
+  `AGPL-3.0-or-later` (same terms as above).
+- The source of every preset is recorded in its `content.origin`
+  (repo, tag, commit, path, license, generator); the full chain of source files
+  and the bed assets are listed in `sources.files` of each package.
+- **These presets are a modified version of the OrcaSlicer profiles** (AGPL-3.0
+  §5(a) notice). They were modified on 2026-11-07 by `scripts/profiles/generate.py`
+  from the OrcaSlicer repository <https://github.com/OrcaSlicer/OrcaSlicer>. The
+  modifications are:
+  - `inherits` chains are flattened into one preset;
+  - keys and values are converted to the Protype settings schema v2; keys the
+    schema cannot hold are dropped (listed with counts in
+    `catalog/<vendor>/report.json`); values libslic3r itself rewrites on load
+    are written as it reads them (the pattern name `zig-zag` as `rectilinear`,
+    comma-joined `bed_exclude_area` and `thumbnails` entries one per item);
+  - machine limits are capped to the manufacturer's `printer.cfg` where it is
+    published;
+  - QIDI rules: tool-change template guard `{if current_extruder != next_extruder}`,
+    the lift before a Box tool change clamped to `max_print_height` (text from
+    QIDI Studio <https://github.com/QIDITECH/QIDIStudio>, AGPL-3.0, commit
+    `21d47457919212b8af3f97705716c261b97be559`), chamber limits, Q2/Q2C nozzle
+    type, exhaust fan off for ABS/ASA on X-Max 4;
+  - the template variable `timelapse_type` is replaced by `0` for the engine;
+  - stable preset ids and names are assigned.
+
+  `report.json` (`rules`, `limits`, `dropped_keys`, `rejected`) records the
+  changes per preset.
+- **Exception: the X-Max 4 kit presets keep Protype's own values.** Machine
+  `c425afad-…`, extruder `698c21b4-…`, process `607a0051-…` and filament
+  `691567e5-…` are Protype's hand tuning on top of the QIDI and OrcaSlicer
+  profiles (first exported from QIDI Studio <https://github.com/QIDITECH/QIDIStudio>),
+  under the same AGPL-3.0-or-later terms. Their source is the file
+  `scripts/profiles/kits/qidi.json` of this repository, which the public engine
+  mirror <https://github.com/dinamicby/protype-slicer-engine> publishes: it
+  holds the four presets in full, so no other repository is needed to read or
+  rebuild them. Their `content.origin` names that file and the generator commit
+  that holds it (the mirror's `REVISION` file maps it), and `report.json`
+  `hand_kits` lists them with the file's git blob id. The values were copied
+  verbatim from Protype Slicer `apps/agent/resources/starter_profiles/presets.json`
+  at commit `51127886f4b2285f1e7701a0ff5c87ec69fa341d`. They replace
+  OrcaSlicer's "Qidi X-Max 4 0.4 nozzle" machine and extruder, and are added
+  beside the OrcaSlicer processes and filaments. They stay as they are until
+  they are checked against the hand profile on a real part (decision of
+  2026-11-07). The machine alone gets seven display-only keys that are not in
+  `presets.json`, listed under `additions` in the same file: `thumbnails` from
+  the OrcaSlicer "Qidi X-Max 4 0.4 nozzle" machine it replaces, and the bed
+  model and overlay of the OrcaSlicer X-Max 4 with the six `bed_visual_*` keys
+  that show them (2026-11-08).
+- Rebuilding. Requirements: Python >= 3.11 (standard library only) and git (the
+  generator fetches the pinned OrcaSlicer tag with a sparse git checkout on first
+  run). The two inputs, `settings_schema.json` and `libslic3r_keys.json`, belong
+  to Protype Slicer, a private repository, and are not published. The committed
+  JSON catalog is itself the editable form of these presets. A byte-for-byte
+  rebuild needs those two snapshots; their sha256 are in `report.json` `inputs`.
+  Protype maintainers extract them from the Slicer commit whose files match
+  those sha256, with
+  `git -C <Slicer> show <commit>:apps/agent/resources/settings_schema.json > settings_schema.json`
+  (same for `libslic3r_keys.json`), and run:
+
+```bash
+python3 scripts/profiles/generate.py --vendor qidi --orca-tag v2.5.0 \
+  --schema settings_schema.json --libslic3r-keys libslic3r_keys.json \
+  --out profiles/catalog/qidi
+```

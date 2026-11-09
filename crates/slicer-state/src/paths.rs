@@ -11,9 +11,15 @@ use std::path::PathBuf;
 /// Linux: `$XDG_DATA_HOME/protype-slicer` (or `~/.local/share/protype-slicer`)
 /// Windows: `%APPDATA%/Protype Slicer`
 ///
+/// `PROTYPE_SLICER_DATA_DIR` overrides the root for isolated daemon runs.
+///
 /// Does not create the directory — callers that need it on disk must
 /// `create_dir_all` themselves.
 pub fn app_data_dir() -> Result<PathBuf> {
+    if let Some(path) = std::env::var_os("PROTYPE_SLICER_DATA_DIR") {
+        anyhow::ensure!(!path.is_empty(), "PROTYPE_SLICER_DATA_DIR is empty");
+        return Ok(PathBuf::from(path));
+    }
     if cfg!(target_os = "macos") {
         let home = std::env::var("HOME").context("HOME not set")?;
         Ok(PathBuf::from(home).join("Library/Application Support/Protype Slicer"))

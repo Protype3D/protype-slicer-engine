@@ -19,6 +19,24 @@ pub enum GeometryError {
     // facets with the same field and the same limits.
     #[error("segments must be between {min} and {max}, got {value}")]
     Segments { value: u32, min: u32, max: u32 },
+    #[error("twist_deg must be between -{max} and {max} degrees, got {value}")]
+    Twist { value: f64, max: f64 },
+    #[error("divisions must be between {min} and {max}, got {value}")]
+    Divisions { value: u32, min: u32, max: u32 },
+    #[error(
+        "twist_deg turns the outline {per_division}° per division and at most {max}° keeps it a \
+         helix: give divisions of at least {needed}, or leave divisions out"
+    )]
+    TwistTooCoarse {
+        per_division: f64,
+        max: f64,
+        needed: u32,
+    },
+    #[error(
+        "this extrude has {vertices} vertices (outline points × (divisions + 1)) and takes at \
+         most {max}: fewer outline points or fewer divisions"
+    )]
+    ExtrudeTooDense { vertices: usize, max: usize },
     #[error("a pattern makes {min} to {max} copies, got {value}")]
     PatternCount { value: u32, min: u32, max: u32 },
     #[error("a loft needs at least {min} sections, got {count}")]

@@ -15,6 +15,7 @@ pub mod host_identity;
 pub mod lockfile;
 pub mod paths;
 pub mod persist;
+pub mod process_owner;
 pub mod project;
 pub mod reducer;
 
@@ -50,6 +51,7 @@ pub struct StateLayer {
     inner: Arc<Mutex<Inner>>,
     event_tx: broadcast::Sender<EventEnvelope>,
     autosave: Option<Arc<AutosaveSink>>,
+    autosave_unavailable_reason: Option<String>,
 }
 
 struct Inner {
@@ -61,6 +63,11 @@ struct Inner {
     /// Path of the currently-open project file (the one we hold the lock
     /// for). `None` until project.save / project.open is called.
     current_path: Option<std::path::PathBuf>,
+}
+
+/// The id of the last event applied, 0 before the first.
+fn last_event_id(inner: &Inner) -> EventId {
+    EventId(inner.next_event_id.saturating_sub(1))
 }
 
 impl StateLayer {
@@ -77,6 +84,7 @@ impl StateLayer {
             })),
             event_tx,
             autosave: None,
+            autosave_unavailable_reason: None,
         }
     }
 
@@ -96,6 +104,26 @@ impl StateLayer {
     pub fn with_autosave(mut self, sink: AutosaveSink) -> Self {
         self.autosave = Some(Arc::new(sink));
         self
+    }
+
+    pub fn with_autosave_failure(mut self, reason: String) -> Self {
+        self.autosave_unavailable_reason = Some(reason);
+        self
+    }
+
+    pub fn autosave_status(&self) -> autosave::AutosaveStatus {
+        self.autosave
+            .as_ref()
+            .map(|sink| sink.status())
+            .unwrap_or(autosave::AutosaveStatus {
+                working: false,
+                reason: Some(
+                    self.autosave_unavailable_reason
+                        .clone()
+                        .unwrap_or_else(|| "autosave is not attached".into()),
+                ),
+                path: None,
+            })
     }
 
     pub fn autosave(&self) -> Option<Arc<AutosaveSink>> {
@@ -185,7 +213,7 @@ impl StateLayer {
         };
         push_log(&mut inner.log, envelope.clone());
         if let Some(sink) = &self.autosave {
-            sink.record(&envelope);
+            sink.record(&envelope, &inner.project);
         }
         let _ = self.event_tx.send(envelope.clone());
         envelope
@@ -222,6 +250,53 @@ impl StateLayer {
         self.inner.lock().project.clone()
     }
 
+    /// Write the project to `path` and make it the autosave's base: a crash
+    /// from here restores it with the edits after it, and a session with no
+    /// edits after it is not offered for recovery, since the file holds it.
+    ///
+    /// The file is written outside the state lock, so a slow disk does not
+    /// stall every other request. An edit that lands meanwhile is not in the
+    /// file; the base then stays where it was, and the log, which holds that
+    /// edit, still restores the window.
+    pub fn save_to(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        let (project, saved_at) = {
+            let inner = self.inner.lock();
+            (inner.project.clone(), last_event_id(&inner))
+        };
+        persist::save(path, &project)?;
+        let inner = self.inner.lock();
+        if last_event_id(&inner) == saved_at {
+            self.anchor_autosave(&inner, true);
+        }
+        Ok(())
+    }
+
+    /// "Don't Save" from the window: drop what the live autosave session
+    /// holds beyond a project file, so the next launch offers nothing for
+    /// it. Under the state lock, like every journal write. `None` when no
+    /// autosave is attached; an error means the refused work is still on
+    /// disk and the window must not report the refusal as done.
+    pub fn discard_autosave(&self) -> Option<anyhow::Result<()>> {
+        let _inner = self.inner.lock();
+        self.autosave.as_ref().map(|sink| sink.discard_unsaved())
+    }
+
+    /// Make the project as it is now the base the autosave restores;
+    /// `on_disk` says a project file holds it. Called under the state lock,
+    /// which every event is logged under, so the base and the cut log agree.
+    /// A failure is logged, not returned: like any autosave write it must not
+    /// fail the swap or save it follows.
+    fn anchor_autosave(&self, inner: &Inner, on_disk: bool) -> bool {
+        let Some(sink) = &self.autosave else {
+            return false;
+        };
+        if let Err(e) = sink.checkpoint(&inner.project, last_event_id(inner), on_disk) {
+            tracing::warn!(?e, "autosave checkpoint failed");
+            return false;
+        }
+        true
+    }
+
     /// Replace the entire project state atomically. Drops the event log
     /// and undo/redo history (the loaded project is the new "origin") and
     /// broadcasts a single `ProjectReplaced` event so subscribers re-fetch
@@ -234,6 +309,10 @@ impl StateLayer {
     /// session. It becomes `current_path` in the same step and is named in the
     /// event, so no subscriber sees the new state paired with the old file.
     ///
+    /// The new state becomes the autosave's base in the same step: no event
+    /// carries the whole project, so a crash would otherwise restore the old
+    /// project's log, or an empty plate, under the edits that follow.
+    ///
     /// Object overrides are stored under their canonical keys, whichever file
     /// or autosave log they were loaded from.
     pub fn replace_state(
@@ -241,6 +320,16 @@ impl StateLayer {
         project: ProjectState,
         path: Option<std::path::PathBuf>,
     ) -> EventEnvelope {
+        self.replace_state_checkpointed(project, path).0
+    }
+
+    /// Return whether the replacement has a durable autosave copy. Recovery
+    /// may delete its source only when this is true, including with no edits.
+    pub fn replace_state_checkpointed(
+        &self,
+        project: ProjectState,
+        path: Option<std::path::PathBuf>,
+    ) -> (EventEnvelope, bool) {
         let project = project.with_canonical_override_keys();
         let mut inner = self.inner.lock();
         inner.project = project.clone();
@@ -248,6 +337,7 @@ impl StateLayer {
         inner.undo.clear();
         inner.redo.clear();
         let event_path = path.as_ref().map(|p| p.to_string_lossy().into_owned());
+        let opened_from_file = path.is_some();
         inner.current_path = path;
         let envelope = EventEnvelope {
             event_id: EventId(inner.next_event_id),
@@ -259,8 +349,9 @@ impl StateLayer {
         };
         inner.next_event_id += 1;
         push_log(&mut inner.log, envelope.clone());
+        let durable = self.anchor_autosave(&inner, opened_from_file);
         let _ = self.event_tx.send(envelope.clone());
-        envelope
+        (envelope, durable)
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<EventEnvelope> {
@@ -274,7 +365,7 @@ impl StateLayer {
     pub fn subscribe_from_now(&self) -> (broadcast::Receiver<EventEnvelope>, EventId) {
         let inner = self.inner.lock();
         let receiver = self.event_tx.subscribe();
-        (receiver, EventId(inner.next_event_id.saturating_sub(1)))
+        (receiver, last_event_id(&inner))
     }
 
     pub fn events_since(&self, since: EventId) -> Vec<EventEnvelope> {
@@ -288,8 +379,7 @@ impl StateLayer {
     }
 
     pub fn current_event_id(&self) -> EventId {
-        let inner = self.inner.lock();
-        EventId(inner.next_event_id.saturating_sub(1))
+        last_event_id(&self.inner.lock())
     }
 }
 
