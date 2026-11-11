@@ -16,6 +16,7 @@ pub mod pattern;
 pub mod planar;
 pub mod section;
 pub mod serial;
+pub mod shared_edge;
 pub mod stl;
 pub mod surface;
 mod surface_formula;

@@ -97,6 +97,7 @@ pub const METHODS: &[&str] = &[
     "preset.delete",
     "preset.list",
     "preset.save",
+    "project.apply_external_edit",
     "project.discard_autosave",
     "project.discard_recovery",
     "project.export_gcode",

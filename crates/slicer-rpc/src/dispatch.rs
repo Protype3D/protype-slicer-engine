@@ -946,7 +946,8 @@ pub(crate) fn object_slice_inputs(
 /// A part's hole nodes cut through `apply_operations` too, from outside this
 /// file: `part::kernel::LibKernel::hole` takes this same lock around the
 /// call and the move of its result into place, which is why it is
-/// `pub(crate)`.
+/// `pub(crate)`. `project.apply_external_edit` measures the file it adds
+/// with `inspect_model` from `external_edit.rs` under this lock as well.
 ///
 /// OCCT's `Interface_Static` (used internally by the STEP reader that
 /// backs all four) is not thread-safe: concurrent STEP parses inside
@@ -2332,6 +2333,18 @@ impl Dispatcher {
                 })
                 .await
                 .map_err(|e| RpcError::Project(format!("geometry task failed: {e}")))?
+            }
+            // A part another process built (the geometry worker) enters the
+            // project here. It copies and measures files, so it runs on the
+            // blocking pool like geometry.build; the measure takes
+            // STEP_FFI_LOCK inside.
+            "project.apply_external_edit" => {
+                let state = self.state.clone();
+                tokio::task::spawn_blocking(move || {
+                    crate::external_edit::handle_apply_external_edit(&state, params)
+                })
+                .await
+                .map_err(|e| RpcError::Project(format!("external edit task failed: {e}")))?
             }
             // CAD parts. A program can run kernels for seconds (OCCT, mcut on
             // a large mesh), so it runs on the blocking pool like

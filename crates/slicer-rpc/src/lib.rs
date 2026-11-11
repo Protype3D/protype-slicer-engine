@@ -5,6 +5,7 @@ mod cut;
 pub mod dispatch;
 pub mod error;
 pub mod estimate;
+pub mod external_edit;
 pub mod gcode;
 pub mod geometry;
 mod ignored_overrides;

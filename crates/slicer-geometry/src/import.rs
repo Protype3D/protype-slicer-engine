@@ -8,7 +8,9 @@
 //!
 //! A mesh that is not a solid is refused here rather than repaired. A boolean
 //! on an open surface gives back something that looks like a part, and nothing
-//! downstream can tell it from one.
+//! downstream can tell it from one. Pieces of a solid that touch along an edge
+//! are a solid, though, only one the kernel cannot take as written, so that
+//! edge is split here: see [`crate::shared_edge`].
 
 use std::collections::HashMap;
 
@@ -16,6 +18,7 @@ use manifold_rust::manifold::Manifold;
 use manifold_rust::types::{Error as KernelError, MeshGL64};
 
 use crate::mesh::{count_unpaired, TriangleMesh};
+use crate::shared_edge::{balanced, split_shared_edges};
 use crate::tree::MAX_DIMENSION_MM;
 
 /// Largest file an `import` reads. Binary STL takes 50 bytes a triangle and
@@ -60,8 +63,8 @@ pub enum ImportError {
     )]
     BadCoordinate { value: f64 },
     #[error(
-        "the mesh is not closed: {open} edges have no single partner, from a hole or from an \
-         edge shared by more than two faces, so it has no inside for a boolean to work on. \
+        "the mesh is not closed: {open} edges have no single partner, from a hole or from faces \
+         on one edge that do not pair up round it, so it has no inside for a boolean to work on. \
          Repair the mesh and import it again"
     )]
     NotClosed { open: usize },
@@ -85,7 +88,9 @@ impl ImportedSolid {
     /// Weld `mesh` the way `mesh.measure` does and take it for a solid, or say
     /// why not. A mesh `mesh.measure` calls closed is one this accepts, and so
     /// is one that only a sliver the weld collapsed keeps it from calling
-    /// closed: an STL rounded to `f32` can hold those.
+    /// closed: an STL rounded to `f32` can hold those. So is one whose only
+    /// unpaired edges are where pieces of it touch: those come out split and
+    /// [`SHARED_EDGE_GAP_MM`](crate::shared_edge::SHARED_EDGE_GAP_MM) apart.
     pub fn from_mesh(mesh: &TriangleMesh) -> Result<Self, ImportError> {
         if mesh.is_empty() {
             return Err(ImportError::Empty);
@@ -105,9 +110,19 @@ impl ImportedSolid {
 
         let (vertices, triangles) = mesh.indexed();
         let open = count_unpaired(triangles.iter().copied());
-        if open > 0 {
+        let (vertices, triangles) = if open == 0 {
+            (vertices, triangles)
+        } else if let Some(split) = split_shared_edges(&vertices, &triangles) {
+            split
+        } else if balanced(&triangles) && mesh.volume_mm3() < 0.0 {
+            // Wound inside out as a whole: round a shared edge the faces then
+            // pair across the empty wedges, and nothing splits.
+            return Err(ImportError::InsideOut {
+                volume: mesh.volume_mm3(),
+            });
+        } else {
             return Err(ImportError::NotClosed { open });
-        }
+        };
         // Only now does this number mean anything: the divergence theorem is
         // for closed surfaces.
         let volume = mesh.volume_mm3();

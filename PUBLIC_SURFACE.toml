@@ -84,6 +84,9 @@ methods = [
     "preset.delete",
     "preset.list",
     "preset.save",
+    # Почему не в воркере: файлы мешей принадлежат демону — общий метод 2
+    # спеки тонкого демона; воркер кладёт деталь в проект только через него.
+    "project.apply_external_edit",
     "project.discard_autosave",
     "project.discard_recovery",
     "project.export_gcode",
