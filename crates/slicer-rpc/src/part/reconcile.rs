@@ -153,6 +153,7 @@ fn add_object(
     out.events.push(ProjectEvent::ObjectGeometryUpdated {
         object_id: object_id.clone(),
         geometry: object_geometry(geometry, body_ref),
+        transform: None,
     });
     out.new_objects.push(object_id.clone());
 }
@@ -188,9 +189,14 @@ fn update_object(
         out.events.push(ProjectEvent::ObjectGeometryUpdated {
             object_id: object.id.clone(),
             geometry: wanted,
+            transform: None,
         });
-        if mesh_changed && clear_paint(out, object) {
-            out.paint_cleared.push(object.id.clone());
+        if mesh_changed {
+            let cleared = clear_paint_events(object);
+            if !cleared.is_empty() {
+                out.events.extend(cleared);
+                out.paint_cleared.push(object.id.clone());
+            }
         }
     }
     // Every consumer recentres a mesh on its own bounds, so a body whose
@@ -208,39 +214,36 @@ fn update_object(
 }
 
 /// Paint is stored per triangle, so a different mesh makes it meaningless.
-/// Cleared with events — undone with the rest of the step.
-fn clear_paint(out: &mut Reconciled, object: &ObjectRecord) -> bool {
-    let mut cleared = false;
+/// The events that clear it — undone with the rest of the step. Empty when
+/// the object carries no paint.
+pub(crate) fn clear_paint_events(object: &ObjectRecord) -> Vec<ProjectEvent> {
+    let mut events = Vec::new();
     if object.support_facets_rle.is_some() {
-        out.events.push(ProjectEvent::ObjectSupportFacetsSet {
+        events.push(ProjectEvent::ObjectSupportFacetsSet {
             object_id: object.id.clone(),
             facets_rle: None,
         });
-        cleared = true;
     }
     if object.seam_facets_rle.is_some() || object.seam_target_point.is_some() {
-        out.events.push(ProjectEvent::ObjectSeamFacetsSet {
+        events.push(ProjectEvent::ObjectSeamFacetsSet {
             object_id: object.id.clone(),
             facets_rle: None,
             target_point: None,
         });
-        cleared = true;
     }
     if object.fan_facets_rle.is_some() {
-        out.events.push(ProjectEvent::ObjectFanFacetsSet {
+        events.push(ProjectEvent::ObjectFanFacetsSet {
             object_id: object.id.clone(),
             facets_rle: None,
         });
-        cleared = true;
     }
     if object.filament_facets_rle.is_some() {
-        out.events.push(ProjectEvent::ObjectFilamentFacetsSet {
+        events.push(ProjectEvent::ObjectFilamentFacetsSet {
             object_id: object.id.clone(),
             facets_rle: None,
         });
-        cleared = true;
     }
-    cleared
+    events
 }
 
 fn object_geometry(geometry: &BodyGeometry, body_ref: &BodyRef) -> ObjectGeometry {

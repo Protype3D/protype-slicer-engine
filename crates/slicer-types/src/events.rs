@@ -225,9 +225,15 @@ pub enum ProjectEvent {
     /// object became a part's body. The object keeps its id, transform,
     /// settings and paint; `geometry.operations` replaces its op stack
     /// (empty for a body: its holes live in the part's document).
+    ///
+    /// `transform`, when present, is set on the object in the same event, so
+    /// a mesh and the placement that goes with it never show apart (history
+    /// replays both directions as one event). Absent: the transform stays.
     ObjectGeometryUpdated {
         object_id: ObjectId,
         geometry: ObjectGeometry,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        transform: Option<[f32; 16]>,
     },
 }
 

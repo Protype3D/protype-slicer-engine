@@ -212,6 +212,7 @@ pub fn reduce(state: &mut ProjectState, event: &ProjectEvent) {
         ProjectEvent::ObjectGeometryUpdated {
             object_id,
             geometry,
+            transform,
         } => {
             // Every field is named and there is no `..`: a field added to
             // `ObjectGeometry` fails to compile here until the reducer handles
@@ -233,6 +234,9 @@ pub fn reduce(state: &mut ProjectState, event: &ProjectEvent) {
                 obj.step_part_index = *step_part_index;
                 obj.operations = operations.clone();
                 obj.body = body.clone();
+                if let Some(transform) = transform {
+                    obj.transform = *transform;
+                }
             }
         }
     }

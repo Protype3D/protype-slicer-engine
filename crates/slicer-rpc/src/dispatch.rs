@@ -4941,6 +4941,7 @@ mod tests {
                 }),
                 ..plain
             },
+            transform: None,
         });
         let mut events = state.subscribe();
         let history = (state.can_undo(), state.can_redo());

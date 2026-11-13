@@ -107,10 +107,15 @@ pub(crate) enum UndoEntry {
         next: Option<Box<PartSnapshot>>,
     },
     /// An object's geometry replaced in place.
+    ///
+    /// `transforms` is `(prev, next)` when the event carried a placement:
+    /// both directions then replay as one event holding geometry and
+    /// transform, so a client never sees one without the other.
     Geometry {
         object_id: ObjectId,
         prev: Box<ObjectGeometry>,
         next: Box<ObjectGeometry>,
+        transforms: Option<([f32; 16], [f32; 16])>,
     },
     /// Every entry one transaction recorded, in the order they were applied.
     Batch(Vec<UndoEntry>),
@@ -425,11 +430,13 @@ pub(crate) fn classify(project: &ProjectState, event: &ProjectEvent) -> HistoryE
         ProjectEvent::ObjectGeometryUpdated {
             object_id,
             geometry,
+            transform,
         } => match project.objects.get(object_id) {
             Some(record) => HistoryEffect::Record(UndoEntry::Geometry {
                 object_id: object_id.clone(),
                 prev: Box::new(record.geometry()),
                 next: Box::new(geometry.clone()),
+                transforms: transform.map(|next| (record.transform, next)),
             }),
             None => HistoryEffect::Neutral,
         },
@@ -486,10 +493,14 @@ pub(crate) fn inverse_events(entry: &UndoEntry) -> Vec<ProjectEvent> {
         UndoEntry::ObjectRemove { record } => restore_events(record),
         UndoEntry::PartSlot { part_id, prev, .. } => vec![part_slot_event(part_id, prev)],
         UndoEntry::Geometry {
-            object_id, prev, ..
+            object_id,
+            prev,
+            transforms,
+            ..
         } => vec![ProjectEvent::ObjectGeometryUpdated {
             object_id: object_id.clone(),
             geometry: (**prev).clone(),
+            transform: transforms.map(|(prev, _)| prev),
         }],
         UndoEntry::Setting {
             scope, key, prev, ..
@@ -588,10 +599,14 @@ pub(crate) fn forward_events(entry: &UndoEntry) -> Vec<ProjectEvent> {
         }],
         UndoEntry::PartSlot { part_id, next, .. } => vec![part_slot_event(part_id, next)],
         UndoEntry::Geometry {
-            object_id, next, ..
+            object_id,
+            next,
+            transforms,
+            ..
         } => vec![ProjectEvent::ObjectGeometryUpdated {
             object_id: object_id.clone(),
             geometry: (**next).clone(),
+            transform: transforms.map(|(_, next)| next),
         }],
         UndoEntry::Setting {
             scope, key, next, ..
@@ -729,6 +744,7 @@ fn restore_events(record: &ObjectRecord) -> Vec<ProjectEvent> {
         events.push(ProjectEvent::ObjectGeometryUpdated {
             object_id: id.clone(),
             geometry: record.geometry(),
+            transform: None,
         });
     }
     let mut keys: Vec<&SettingKey> = overrides.keys().collect();
