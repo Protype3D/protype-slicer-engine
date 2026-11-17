@@ -220,9 +220,21 @@ impl SerialMark {
     }
 }
 
+/// A vertex as an STL reader sees it: the exact coordinates, with -0.0 and
+/// 0.0 one point. Input is welded by this key and output is checked by it.
+fn vertex_key(p: &[f64; 3]) -> [u64; 3] {
+    p.map(|v| if v == 0.0 { 0 } else { v.to_bits() })
+}
+
 fn solid(mesh: &TriangleMesh) -> Result<Manifold, String> {
-    if mesh.triangles.len() > 500_000 {
-        return Err("Mesh exceeds 500000 triangles".into());
+    // The same kernel limit an `import` node has. A 735 226-triangle
+    // sculpture took 2.6 s to search and 3 s to engrave on an M5 Max
+    // (2026-11-16, release build), well inside the 90 s the window waits.
+    if mesh.triangles.len() > crate::MAX_IMPORT_TRIANGLES {
+        return Err(format!(
+            "Mesh exceeds {} triangles",
+            crate::MAX_IMPORT_TRIANGLES
+        ));
     }
     let mut vertices = HashMap::new();
     let mut input = MeshGL64 {
@@ -236,8 +248,7 @@ fn solid(mesh: &TriangleMesh) -> Result<Manifold, String> {
             }
             // Exact welding preserves geometry; unclosed or noisy input is
             // rejected rather than silently repaired and reshaped.
-            let key = p.map(|v| if v == 0.0 { 0 } else { v.to_bits() });
-            let index = *vertices.entry(key).or_insert_with(|| {
+            let index = *vertices.entry(vertex_key(p)).or_insert_with(|| {
                 let index = input.vert_properties.len() as u64 / 3;
                 input.vert_properties.extend_from_slice(p);
                 index
@@ -438,10 +449,18 @@ pub fn engrave(mesh: &TriangleMesh, mark: &SerialMark) -> Result<Vec<u8>, String
     }
     let bytes = crate::stl::to_binary_stl(&result);
     let check = TriangleMesh::from_stl_bytes(&bytes).map_err(|e| e.to_string())?;
-    if !check.measure().map_err(|e| e.to_string())?.is_manifold {
+    // Judged by the weld the input passed: exact coordinates of the written
+    // file. The 0.1 µm weld of `measure` folds a sculpture's own sub-micron
+    // triangles into holes the source mesh never had.
+    let unpaired = crate::mesh::count_unpaired(
+        check
+            .triangles
+            .iter()
+            .map(|triangle| triangle.each_ref().map(vertex_key)),
+    );
+    if unpaired != 0 {
         return Err(format!(
-            "Engraving produced an unclosed mesh: {:?}",
-            check.measure()
+            "Engraving produced an unclosed mesh: {unpaired} unpaired edges"
         ));
     }
     Ok(bytes)
@@ -792,5 +811,89 @@ mod tests {
         let mut mesh = block();
         mesh.triangles.pop();
         assert!(engrave(&mesh, &mark()).is_err());
+    }
+
+    /// A closed box whose top and bottom are an `n`×`n` grid of squares:
+    /// 4n² + 8n triangles. Each vertex comes from one formula, so neighbours
+    /// agree on it to the bit, as in a real exported STL.
+    fn gridded_box(n: usize, side: f64, height: f64) -> TriangleMesh {
+        let at = |i: usize| i as f64 * side / n as f64 - side / 2.0;
+        let mut triangles = Vec::with_capacity(4 * n * n + 8 * n);
+        for i in 0..n {
+            for j in 0..n {
+                let p = |di: usize, dj: usize, z: f64| [at(i + di), at(j + dj), z];
+                let (top, bottom) = (height, 0.0);
+                triangles.push([p(0, 0, top), p(1, 0, top), p(1, 1, top)]);
+                triangles.push([p(0, 0, top), p(1, 1, top), p(0, 1, top)]);
+                triangles.push([p(0, 0, bottom), p(1, 1, bottom), p(1, 0, bottom)]);
+                triangles.push([p(0, 0, bottom), p(0, 1, bottom), p(1, 1, bottom)]);
+            }
+            let (lo, hi) = (at(0), at(n));
+            let (a, b) = (at(i), at(i + 1));
+            // Walls facing −y and +x wind one way, +y and −x the other.
+            for (y, outward) in [(lo, true), (hi, false)] {
+                let (b0, b1, t0, t1) = ([a, y, 0.], [b, y, 0.], [a, y, height], [b, y, height]);
+                triangles.extend(if outward {
+                    [[b0, b1, t1], [b0, t1, t0]]
+                } else {
+                    [[b0, t1, b1], [b0, t0, t1]]
+                });
+            }
+            for (x, outward) in [(hi, true), (lo, false)] {
+                let (b0, b1, t0, t1) = ([x, a, 0.], [x, b, 0.], [x, a, height], [x, b, height]);
+                triangles.extend(if outward {
+                    [[b0, b1, t1], [b0, t1, t0]]
+                } else {
+                    [[b0, t1, b1], [b0, t0, t1]]
+                });
+            }
+        }
+        TriangleMesh::new(triangles)
+    }
+
+    #[test]
+    fn marks_a_mesh_past_half_a_million_triangles() {
+        // A sculpture straight from a scan or a generator: the slicer takes
+        // it, so serial marking must too, up to the kernel's import limit.
+        let mesh = gridded_box(360, 60.0, 5.0);
+        assert!(mesh.triangles.len() > 500_000);
+        assert!(mesh.triangles.len() <= crate::MAX_IMPORT_TRIANGLES);
+        let found = candidates(&mesh, 3.5, 0.4, 1.0, SerialLayout::Row).unwrap();
+        assert!(!found.is_empty());
+    }
+
+    #[test]
+    fn refuses_a_mesh_past_the_import_limit_and_names_it() {
+        let triangle = [[0., 0., 0.], [1., 0., 0.], [0., 1., 0.]];
+        let mesh = TriangleMesh::new(vec![triangle; crate::MAX_IMPORT_TRIANGLES + 1]);
+        let error = candidates(&mesh, 3.5, 0.4, 1.0, SerialLayout::Row).unwrap_err();
+        assert!(
+            error.contains(&crate::MAX_IMPORT_TRIANGLES.to_string()),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn engraves_a_closed_mesh_with_vertices_closer_than_the_weld_tolerance() {
+        // Generated sculptures carry such features: exactly closed, yet a
+        // 0.1 µm weld folds them into what looks like holes.
+        let mut triangles = block().triangles;
+        let bottom = triangles
+            .iter()
+            .position(|t| t.iter().all(|p| p[2] == -2.5))
+            .unwrap();
+        let [a, b, c] = triangles.remove(bottom);
+        let centre: [f64; 3] = std::array::from_fn(|i| (a[i] + b[i] + c[i]) / 3.0);
+        let toward: [f64; 3] = std::array::from_fn(|i| centre[i] - a[i]);
+        let length = dot(toward, toward).sqrt();
+        let near: [f64; 3] = std::array::from_fn(|i| a[i] + toward[i] * 0.000_05 / length);
+        triangles.extend([[a, b, near], [b, c, near], [c, a, near]]);
+        let source = TriangleMesh::new(triangles);
+        assert!(
+            !source.measure().unwrap().is_manifold,
+            "the tolerant weld must see the near-duplicate vertex"
+        );
+        let output = TriangleMesh::from_stl_bytes(&engrave(&source, &mark()).unwrap()).unwrap();
+        assert!(output.volume_mm3() < source.volume_mm3());
     }
 }
