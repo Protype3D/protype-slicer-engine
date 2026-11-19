@@ -186,17 +186,15 @@ fn update_object(
     if object.geometry() != wanted {
         let mesh_changed = object.source_hash != geometry.source_hash
             || object.triangle_count != geometry.triangle_count;
+        let cleared = replacement_paint_events(object, &wanted, !mesh_changed);
         out.events.push(ProjectEvent::ObjectGeometryUpdated {
             object_id: object.id.clone(),
             geometry: wanted,
             transform: None,
         });
-        if mesh_changed {
-            let cleared = clear_paint_events(object);
-            if !cleared.is_empty() {
-                out.events.extend(cleared);
-                out.paint_cleared.push(object.id.clone());
-            }
+        if !cleared.is_empty() {
+            out.events.extend(cleared);
+            out.paint_cleared.push(object.id.clone());
         }
     }
     // Every consumer recentres a mesh on its own bounds, so a body whose
@@ -213,11 +211,35 @@ fn update_object(
     }
 }
 
-/// Paint is stored per triangle, so a different mesh makes it meaningless.
-/// The events that clear it — undone with the rest of the step. Empty when
-/// the object carries no paint.
-pub(crate) fn clear_paint_events(object: &ObjectRecord) -> Vec<ProjectEvent> {
+/// These events share the geometry replacement's undo step. Other paint may
+/// be kept by request; fuzzy indices must be resolved again on a new source.
+pub(crate) fn replacement_paint_events(
+    object: &ObjectRecord,
+    geometry: &ObjectGeometry,
+    keep_paint: bool,
+) -> Vec<ProjectEvent> {
     let mut events = Vec::new();
+    let source_changed = object.source_path != geometry.source_path
+        || object.source_hash != geometry.source_hash
+        || object.triangle_count != geometry.triangle_count
+        || object.step_part_index != geometry.step_part_index;
+    if (!keep_paint || source_changed)
+        && object.fuzzy_facets.facets_rle.is_some()
+        && object.fuzzy_facets.mesh_path.as_deref() != Some("")
+    {
+        // Preserve the selection for the window to resolve on the replacement.
+        events.push(ProjectEvent::ObjectFuzzyFacetsSet {
+            object_id: object.id.clone(),
+            paint: slicer_types::FuzzyFacets {
+                mesh_path: Some(String::new()),
+                ..object.fuzzy_facets.clone()
+            },
+            overrides: Default::default(),
+        });
+    }
+    if keep_paint {
+        return events;
+    }
     if object.support_facets_rle.is_some() {
         events.push(ProjectEvent::ObjectSupportFacetsSet {
             object_id: object.id.clone(),

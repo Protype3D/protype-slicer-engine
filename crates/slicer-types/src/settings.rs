@@ -71,6 +71,15 @@ pub const OVERRIDABLE_KEYS: &[&str] = &[
     "infill_density",
     "infill_pattern",
     "support_enabled",
+    "fuzzy_skin",
+    "fuzzy_skin_thickness",
+    "fuzzy_skin_point_distance",
+    "fuzzy_skin_first_layer",
+    "fuzzy_skin_noise_type",
+    "fuzzy_skin_mode",
+    "fuzzy_skin_scale",
+    "fuzzy_skin_octaves",
+    "fuzzy_skin_persistence",
     "ironing_type",
     "ironing_flow",
     "ironing_speed",
@@ -130,7 +139,38 @@ pub fn canonical_override_key(key: &str) -> &str {
 /// the UI's override panel (`packages/ui/src/components/overrides/overrideDefs.ts`
 /// in Slicer).
 pub fn object_override_constraint(key: &str) -> Option<SettingConstraint> {
+    let choices = |values: &[&str]| SettingConstraint::Enum {
+        options: values
+            .iter()
+            .map(|v| EnumOption {
+                value: (*v).into(),
+                label: (*v).into(),
+            })
+            .collect(),
+    };
+    let number = |min, max, unit: &str| SettingConstraint::Number {
+        min,
+        max,
+        step: 0.01,
+        unit: unit.into(),
+    };
     match key {
+        // Limits and enum spellings from libslic3r's PrintConfigDef.
+        "fuzzy_skin" => Some(choices(&["none", "external", "all", "allwalls"])),
+        "fuzzy_skin_noise_type" => Some(choices(&[
+            "classic",
+            "perlin",
+            "billow",
+            "ridgedmulti",
+            "voronoi",
+        ])),
+        "fuzzy_skin_mode" => Some(choices(&["displacement", "extrusion", "combined"])),
+        "fuzzy_skin_first_layer" => Some(SettingConstraint::Bool),
+        "fuzzy_skin_thickness" => Some(number(0., 1., "mm")),
+        "fuzzy_skin_point_distance" => Some(number(0., 5., "mm")),
+        "fuzzy_skin_scale" => Some(number(0.1, 500., "mm")),
+        "fuzzy_skin_octaves" => Some(SettingConstraint::Int { min: 1, max: 10 }),
+        "fuzzy_skin_persistence" => Some(number(0.01, 1., "")),
         // Canonical name of the schema's `perimeter_count`.
         "wall_loops" => Some(SettingConstraint::Int { min: 1, max: 12 }),
         "support_interface_spacing" => Some(SettingConstraint::Number {

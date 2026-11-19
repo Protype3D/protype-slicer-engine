@@ -96,6 +96,8 @@
 #include <BRepLib.hxx>
 #include <BRepOffsetAPI_ThruSections.hxx>
 #include <BRepTools.hxx>
+#include <BRepTools_WireExplorer.hxx>
+#include <Poly_PolygonOnTriangulation.hxx>
 #include <BRepTools_ReShape.hxx>
 #include <Geom_Plane.hxx>
 #include <Geom_Surface.hxx>
@@ -1200,10 +1202,16 @@ struct UiFacetMaskMapping {
     PaintApplyStats stats;
 };
 
+bool is_step_path(const std::string& path) {
+    const auto ext = lowercase_ascii(utf8_path(path).extension().u8string());
+    return ext == ".step" || ext == ".stp";
+}
+
 // A UI paint mask mapped onto the loaded facets of every volume of `mo`.
 // The wire format is base64([value:u8][run_length:u32 LE]...), a value's
 // position being the facet it paints; a value above `max_value` refuses the
-// whole mask (std::nullopt, with a warning). A volume with as many facets as
+// whole mask (std::nullopt, with a warning). Object-wide masks follow volume
+// order. For legacy masks, a volume with as many facets as
 // the mask takes it as-is. One that libslic3r's STL repair left with a
 // different count takes it by facet centroid, from the painted facets of
 // `source_path` — the object's own mesh file, read at the first such volume.
@@ -1216,7 +1224,8 @@ std::optional<UiFacetMaskMapping> map_ui_facet_mask(const Slic3r::ModelObject& m
                                                     const std::string& source_path,
                                                     const std::string& rle,
                                                     uint8_t max_value,
-                                                    const char* kind) {
+                                                    const char* kind,
+                                                    bool require_object_order = false) {
     const SeamFacetDecode mask = decode_ui_facets_rle(rle, max_value);
     if (!mask.ok) {
         BOOST_LOG_TRIVIAL(warning)
@@ -1227,6 +1236,15 @@ std::optional<UiFacetMaskMapping> map_ui_facet_mask(const Slic3r::ModelObject& m
     UiFacetMaskMapping mapping;
     mapping.volumes.resize(mo.volumes.size());
     PaintApplyStats& stats = mapping.stats;
+    // Both the edit mesh and the STEP face map concatenate the object's
+    // volumes. Every paint kind uses the same offsets for an object-wide mask.
+    size_t total = 0;
+    for (const auto* volume : mo.volumes)
+        if (volume) total += volume->mesh().facets_count();
+    const bool object_order = total == mask.facets.size();
+    if (require_object_order && !object_order)
+        throw std::runtime_error("fuzzy paint does not match the sliced mesh; repaint after repair");
+    size_t offset = 0;
     bool raw_read = false;
     MaskFacetOrder raw_order = MaskFacetOrder::Unknown;
     std::vector<RawPaintedFacet> raw_painted;
@@ -1237,9 +1255,11 @@ std::optional<UiFacetMaskMapping> map_ui_facet_mask(const Slic3r::ModelObject& m
         stats.loaded_facets += its.indices.size();
 
         VolumeFacetValues& volume = mapping.volumes[vi];
-        if (mask.facets.size() == its.indices.size()) {
+        if (object_order || mask.facets.size() == its.indices.size()) {
             stats.strategy = "direct";
-            volume.values = mask.facets;
+            const auto begin = mask.facets.begin() + offset;
+            volume.values.assign(begin, begin + its.indices.size());
+            if (object_order) offset += its.indices.size();
             volume.applied = count_painted(volume.values);
             stats.direct_applied += volume.applied;
         } else {
@@ -1296,7 +1316,9 @@ void apply_ui_facet_paint(Slic3r::ModelObject& mo,
                           std::ostream& log) {
     if (rle.empty()) return;
     const std::optional<UiFacetMaskMapping> mapping =
-        map_ui_facet_mask(mo, source_path, rle, MAX_SEAM_SUPPORT_FACET_VALUE, kind);
+        map_ui_facet_mask(mo, source_path, rle, MAX_SEAM_SUPPORT_FACET_VALUE, kind,
+                          layer == &Slic3r::ModelVolume::fuzzy_skin_facets &&
+                          (mo.volumes.size() > 1 || is_step_path(source_path)));
     if (!mapping) return;
     for (std::size_t vi = 0; vi < mo.volumes.size(); ++vi) {
         const VolumeFacetValues& volume = mapping->volumes[vi];
@@ -1435,9 +1457,7 @@ Slic3r::Model load_model_for_path(const std::string& path) {
     // installs is per-thread on Windows) before any STEP/IGES geometry work.
     OSD::SetSignal(false);
 #endif
-    const std::string ext =
-        lowercase_ascii(utf8_path(path).extension().u8string());
-    if (ext == ".step" || ext == ".stp") {
+    if (is_step_path(path)) {
         // See occt_step_mutex() above: process-wide STEP-parse serialization.
         std::lock_guard<std::mutex> occt_lock(occt_step_mutex());
         return Slic3r::Model::read_from_step(
@@ -1449,6 +1469,15 @@ Slic3r::Model load_model_for_path(const std::string& path) {
             0.003,
             0.5,
             false);
+    }
+    if (lowercase_ascii(utf8_path(path).extension().u8string()) == ".3mf") {
+        // The 3MF reader requires LoadModel even for a geometry-only import.
+        Slic3r::PlateDataPtrs plates;
+        std::vector<Slic3r::Preset*> presets;
+        Slic3r::ScopeGuard release_plates([&] { Slic3r::release_PlateData_list(plates); });
+        return Slic3r::Model::read_from_file(path, nullptr, nullptr,
+            Slic3r::LoadStrategy::AddDefaultInstances | Slic3r::LoadStrategy::LoadModel,
+            &plates, &presets);
     }
     return Slic3r::Model::read_from_file(path);
 }
@@ -3142,6 +3171,7 @@ BridgeSliceOutcome run_slice(
                 for (const BridgeObjectInputs& obj : settings.objects) {
                     if (!obj.seam_facets_rle.empty() ||
                         !obj.support_facets_rle.empty() ||
+                        !obj.fuzzy_facets_rle.empty() ||
                         !obj.fan_facets_rle.empty() ||
                         !obj.filament_facets_rle.empty() ||
                         !obj.layer_height_profile.empty() ||
@@ -3346,6 +3376,8 @@ BridgeSliceOutcome run_slice(
                         std::string(obj.support_facets_rle.begin(),
                                     obj.support_facets_rle.end()),
                         "support", &Slic3r::ModelVolume::supported_facets, paint_diag_log);
+                    apply_ui_facet_paint(*mo, obj_path, std::string(obj.fuzzy_facets_rle),
+                        "fuzzy", &Slic3r::ModelVolume::fuzzy_skin_facets, paint_diag_log);
                     apply_ui_filament_paint(*mo, obj_path,
                         std::string(obj.filament_facets_rle.begin(), obj.filament_facets_rle.end()),
                         extruder_count, paint_diag_log);
@@ -4158,6 +4190,27 @@ BridgeFaceQueryOutcome bridge_query_model_faces(
                     faces_json << ",\"origin\":[" << o.X() << "," << o.Y() << "," << o.Z() << "]"
                                << ",\"axis\":[" << n.X() << "," << n.Y() << "," << n.Z() << "]"
                                << ",\"radius_mm\":null";
+                    GProp_GProps properties;
+                    BRepGProp::SurfaceProperties(face, properties);
+                    faces_json << ",\"area_mm2\":" << properties.Mass() << ",\"outline\":[";
+                    bool first = true;
+                    // Use the same tessellation as the edit mesh, including
+                    // curved boundaries (a disk can have just one vertex).
+                    const TopoDS_Wire wire = BRepTools::OuterWire(face);
+                    for (BRepTools_WireExplorer edges(wire, face); edges.More(); edges.Next()) {
+                        const TopoDS_Edge& edge = edges.Current();
+                        const auto& poly = BRep_Tool::PolygonOnTriangulation(edge, tri, loc);
+                        if (poly.IsNull()) continue;
+                        const int count = poly->NbNodes();
+                        // Skip each edge's last point, shared with the next edge.
+                        for (int k = 0; k + 1 < count; ++k) {
+                            const int index = edge.Orientation() == TopAbs_REVERSED ? count - k : k + 1;
+                            const gp_Pnt p = tri->Node(poly->Node(index)).Transformed(aTrsf);
+                            faces_json << (first ? "" : ",") << "[" << p.X() << "," << p.Y() << "," << p.Z() << "]";
+                            first = false;
+                        }
+                    }
+                    faces_json << "]";
                 } else if (surf_type == GeomAbs_Cone) {
                     const gp_Cone c = surf.Cone();
                     const gp_Pnt o = c.Axis().Location();

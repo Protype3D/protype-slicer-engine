@@ -48,6 +48,8 @@ struct Base {
     /// it has nothing a file does not.
     on_disk: bool,
     project: ProjectFile,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    assistant: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -88,7 +90,7 @@ fn serialize_lossy_path<S: serde::Serializer>(
 /// the project (the reducer ignores them), so recovery has no use for them;
 /// journaling them would make a session saved and then sliced look like
 /// unsaved work, and cost an fsync per progress tick under the state lock.
-fn is_journaled(event: &ProjectEvent) -> bool {
+pub(crate) fn is_journaled(event: &ProjectEvent) -> bool {
     !matches!(
         event,
         ProjectEvent::SliceRequested { .. }
@@ -251,6 +253,7 @@ impl AutosaveSink {
                 through,
                 on_disk,
                 project: ProjectFile::from_state(project),
+                assistant: project.assistant.clone(),
             };
             write_base(&self.dir, &base)?;
             self.truncate_log()
@@ -395,7 +398,11 @@ pub fn recover(root: &Path, project_id: &str, current: Option<&str>) -> Result<P
         Err(e) => return Err(e).with_context(|| format!("open {}", log_path.display())),
     };
     let (mut state, through) = match base {
-        Some(base) => (base.project.into_state()?, base.through),
+        Some(base) => (
+            base.project
+                .into_state(base.assistant.filter(serde_json::Value::is_object))?,
+            base.through,
+        ),
         None => (ProjectState::default(), EventId(0)),
     };
     let Some(log) = log else {

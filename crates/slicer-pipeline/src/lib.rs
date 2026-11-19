@@ -40,6 +40,7 @@ impl PlateObject {
             seam_facets_rle: String::new(),
             support_facets_rle: String::new(),
             fan_facets_rle: None,
+            fuzzy_facets_rle: None,
             filament_facets_rle: None,
             layer_height_profile: Vec::new(),
             layer_ranges: Vec::new(),

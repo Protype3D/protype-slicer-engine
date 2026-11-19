@@ -7,6 +7,7 @@
 use crate::project::{display_name, ObjectRecord, ProjectState};
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use slicer_types::{
     AdaptiveRule, BodyRef, Bounds, FeatureOp, LayerConfigRange, ObjectId, PartSnapshot, Preset,
     PresetState, ProjectMeta, SettingKey, SettingScope, SettingValue,
@@ -16,7 +17,21 @@ use std::io::{Read, Write};
 use std::path::Path;
 
 const PROTYPE_VERSION_FILE: &str = "Protype/version.json";
+const PROTYPE_ASSISTANT_FILE: &str = "Protype/assistant.json";
 const PROTYPE_PROJECT_FILE: &str = "Protype/project.json";
+
+pub const MAX_ASSISTANT_JSON_BYTES: usize = 16 * 1024 * 1024;
+/// Leave room for the enclosing autosave base within serde_json's nesting limit.
+pub const MAX_ASSISTANT_JSON_DEPTH: usize = 64;
+
+/// Number of nested JSON containers, including the root object.
+pub fn assistant_json_depth(value: &Value) -> usize {
+    match value {
+        Value::Object(fields) => 1 + fields.values().map(assistant_json_depth).max().unwrap_or(0),
+        Value::Array(items) => 1 + items.iter().map(assistant_json_depth).max().unwrap_or(0),
+        _ => 0,
+    }
+}
 
 /// Highest on-disk format this daemon reads. v2 = a project carrying CAD parts
 /// or part bodies. A project with neither is still written as v1, so older
@@ -36,7 +51,7 @@ struct VersionFile {
     machine_id_hash: Option<String>,
 }
 
-/// `Protype/project.json`: the whole project state in its on-disk form. The
+/// `Protype/project.json`: the scene in its on-disk form. The
 /// autosave keeps the base a session restores in the same form.
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct ProjectFile {
@@ -91,6 +106,12 @@ struct SerializedObject {
     /// `serde(default)` keeps them loadable.
     #[serde(default)]
     fan_facets_rle: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fuzzy_facets_rle: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fuzzy_facets_mesh: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fuzzy_overlay: Option<serde_json::Map<String, serde_json::Value>>,
     #[serde(default)]
     filament_facets_rle: Option<String>,
     /// Per-object variable-layer-height profile as a flat
@@ -171,6 +192,12 @@ pub fn save(path: &Path, project: &ProjectState) -> Result<()> {
             project,
         ))?)?;
 
+        if let Some(block) = &project.assistant {
+            anyhow::ensure!(block.is_object(), "assistant must be a JSON object");
+            zip.start_file(PROTYPE_ASSISTANT_FILE, opts)?;
+            serde_json::to_writer(&mut zip, block)?;
+        }
+
         let file = zip.finish()?;
         // Best effort: F_FULLFSYNC fails on some network and FUSE mounts, and
         // a save there must still work as it did before syncing existed.
@@ -221,7 +248,37 @@ pub fn load(path: &Path) -> Result<ProjectState> {
 
     let project_file: ProjectFile = read_json(&mut zip, PROTYPE_PROJECT_FILE)
         .context("missing or invalid Protype/project.json")?;
-    project_file.into_state()
+    let assistant = read_assistant(&mut zip).unwrap_or_else(|error| {
+        tracing::warn!(%error, path = %path.display(), "ignoring invalid Protype/assistant.json");
+        None
+    });
+    project_file.into_state(assistant)
+}
+
+/// Optional window data must never prevent the scene from opening.
+fn read_assistant<R: Read + std::io::Seek>(
+    zip: &mut zip::ZipArchive<R>,
+) -> Result<Option<serde_json::Value>> {
+    let entry = match zip.by_name(PROTYPE_ASSISTANT_FILE) {
+        Ok(entry) => entry,
+        Err(zip::result::ZipError::FileNotFound) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let mut bytes = Vec::new();
+    entry
+        .take(MAX_ASSISTANT_JSON_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    anyhow::ensure!(
+        bytes.len() <= MAX_ASSISTANT_JSON_BYTES,
+        "assistant exceeds {MAX_ASSISTANT_JSON_BYTES} bytes"
+    );
+    let value: Value = serde_json::from_slice(&bytes)?;
+    anyhow::ensure!(value.is_object(), "assistant must be a JSON object");
+    anyhow::ensure!(
+        assistant_json_depth(&value) <= MAX_ASSISTANT_JSON_DEPTH,
+        "assistant exceeds {MAX_ASSISTANT_JSON_DEPTH} levels"
+    );
+    Ok(Some(value))
 }
 
 impl ProjectFile {
@@ -234,6 +291,9 @@ impl ProjectFile {
                 .values()
                 .map(|o| SerializedObject {
                     recipe: o.recipe.clone(),
+                    fuzzy_facets_rle: o.fuzzy_facets.facets_rle.clone(),
+                    fuzzy_facets_mesh: o.fuzzy_facets.mesh_path.clone(),
+                    fuzzy_overlay: o.fuzzy_facets.overlay.clone(),
                     filament_facets_rle: o.filament_facets_rle.clone(),
                     id: o.id.clone(),
                     name: o.name.clone(),
@@ -269,8 +329,9 @@ impl ProjectFile {
         }
     }
 
-    pub(crate) fn into_state(self) -> Result<ProjectState> {
+    pub(crate) fn into_state(self, assistant: Option<serde_json::Value>) -> Result<ProjectState> {
         let mut state = ProjectState {
+            assistant,
             meta: self.meta,
             presets: self.presets,
             objects: BTreeMap::new(),
@@ -283,7 +344,14 @@ impl ProjectFile {
                 .map(|part| (part.part_id.clone(), part))
                 .collect(),
         };
-        for o in self.objects {
+        for mut o in self.objects {
+            if let Err(reason) =
+                crate::paint::validate_paint_runs(o.fuzzy_facets_rle.as_deref(), "fuzzy", 2)
+            {
+                tracing::warn!(object_id = %o.id.0, %reason, "discarding invalid fuzzy paint");
+                o.fuzzy_facets_rle = None;
+                o.fuzzy_facets_mesh = None;
+            }
             if let Some(recipe) = &o.recipe {
                 crate::project::validate_recipe(recipe).map_err(|e| anyhow!(e))?;
             }
@@ -292,6 +360,11 @@ impl ProjectFile {
                 o.id.clone(),
                 ObjectRecord {
                     recipe: o.recipe,
+                    fuzzy_facets: slicer_types::FuzzyFacets {
+                        facets_rle: o.fuzzy_facets_rle,
+                        mesh_path: o.fuzzy_facets_mesh,
+                        overlay: o.fuzzy_overlay,
+                    },
                     filament_facets_rle: o.filament_facets_rle,
                     id: o.id,
                     name,
@@ -375,6 +448,7 @@ mod tests {
                 ),
                 support_facets_rle: None,
                 fan_facets_rle: None,
+                fuzzy_facets: Default::default(),
                 filament_facets_rle: None,
                 layer_height_profile: Vec::new(),
                 layer_ranges: Vec::new(),

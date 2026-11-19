@@ -7,8 +7,8 @@
 
 use crate::project::{display_name, ObjectRecord, ProjectState};
 use slicer_types::{
-    AdaptiveRule, FeatureOp, LayerConfigRange, ObjectGeometry, ObjectId, PartId, PartSnapshot,
-    ProjectEvent, SettingKey, SettingScope, SettingValue, StepPartPayload,
+    AdaptiveRule, FeatureOp, LayerConfigRange, ObjectGeometry, ObjectId, ObjectOverridePatch,
+    PartId, PartSnapshot, ProjectEvent, SettingKey, SettingScope, SettingValue, StepPartPayload,
 };
 
 /// Maximum number of entries kept on the undo / redo stacks. Older entries
@@ -63,6 +63,13 @@ pub(crate) enum UndoEntry {
         object_id: ObjectId,
         prev: Option<String>,
         next: Option<String>,
+    },
+    FuzzyFacets {
+        object_id: ObjectId,
+        prev: slicer_types::FuzzyFacets,
+        next: slicer_types::FuzzyFacets,
+        prev_overrides: ObjectOverridePatch,
+        next_overrides: ObjectOverridePatch,
     },
     FilamentFacets {
         object_id: ObjectId,
@@ -363,6 +370,28 @@ pub(crate) fn classify(project: &ProjectState, event: &ProjectEvent) -> HistoryE
                 .and_then(|o| o.fan_facets_rle.clone()),
             next: facets_rle.clone(),
         }),
+        ProjectEvent::ObjectFuzzyFacetsSet {
+            object_id,
+            paint,
+            overrides,
+        } => {
+            let object = project.objects.get(object_id);
+            HistoryEffect::Record(UndoEntry::FuzzyFacets {
+                object_id: object_id.clone(),
+                prev: object.map(|o| o.fuzzy_facets.clone()).unwrap_or_default(),
+                next: paint.clone(),
+                prev_overrides: overrides
+                    .keys()
+                    .map(|key| {
+                        (
+                            key.clone(),
+                            object.and_then(|o| o.overrides.get(key)).cloned(),
+                        )
+                    })
+                    .collect(),
+                next_overrides: overrides.clone(),
+            })
+        }
         ProjectEvent::ObjectFilamentFacetsSet {
             object_id,
             facets_rle,
@@ -559,6 +588,16 @@ pub(crate) fn inverse_events(entry: &UndoEntry) -> Vec<ProjectEvent> {
             object_id: object_id.clone(),
             facets_rle: prev.clone(),
         }],
+        UndoEntry::FuzzyFacets {
+            object_id,
+            prev,
+            prev_overrides,
+            ..
+        } => vec![ProjectEvent::ObjectFuzzyFacetsSet {
+            object_id: object_id.clone(),
+            paint: prev.clone(),
+            overrides: prev_overrides.clone(),
+        }],
         UndoEntry::FilamentFacets {
             object_id, prev, ..
         } => vec![ProjectEvent::ObjectFilamentFacetsSet {
@@ -663,6 +702,16 @@ pub(crate) fn forward_events(entry: &UndoEntry) -> Vec<ProjectEvent> {
             object_id: object_id.clone(),
             facets_rle: next.clone(),
         }],
+        UndoEntry::FuzzyFacets {
+            object_id,
+            next,
+            next_overrides,
+            ..
+        } => vec![ProjectEvent::ObjectFuzzyFacetsSet {
+            object_id: object_id.clone(),
+            paint: next.clone(),
+            overrides: next_overrides.clone(),
+        }],
         UndoEntry::FilamentFacets {
             object_id, next, ..
         } => vec![ProjectEvent::ObjectFilamentFacetsSet {
@@ -710,6 +759,7 @@ fn restore_events(record: &ObjectRecord) -> Vec<ProjectEvent> {
         seam_target_point,
         support_facets_rle,
         fan_facets_rle,
+        fuzzy_facets,
         filament_facets_rle,
         layer_height_profile,
         layer_ranges,
@@ -773,6 +823,13 @@ fn restore_events(record: &ObjectRecord) -> Vec<ProjectEvent> {
         events.push(ProjectEvent::ObjectFanFacetsSet {
             object_id: id.clone(),
             facets_rle: fan_facets_rle.clone(),
+        });
+    }
+    if fuzzy_facets.facets_rle.is_some() || fuzzy_facets.overlay.is_some() {
+        events.push(ProjectEvent::ObjectFuzzyFacetsSet {
+            object_id: id.clone(),
+            paint: fuzzy_facets.clone(),
+            overrides: Default::default(),
         });
     }
     if filament_facets_rle.is_some() {

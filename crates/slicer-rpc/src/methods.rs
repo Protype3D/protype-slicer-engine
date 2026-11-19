@@ -77,6 +77,7 @@ pub const METHODS: &[&str] = &[
     "object.serial_candidates",
     "object.set_fan_facets",
     "object.set_filament_facets",
+    "object.set_fuzzy_facets",
     "object.set_layer_height_profile",
     "object.set_layer_ranges",
     "object.set_operations",
@@ -98,6 +99,7 @@ pub const METHODS: &[&str] = &[
     "preset.list",
     "preset.save",
     "project.apply_external_edit",
+    "project.assistant_get",
     "project.discard_autosave",
     "project.discard_recovery",
     "project.export_gcode",
@@ -157,6 +159,7 @@ pub fn capabilities() -> Vec<String> {
     vec![
         "events.subscribe".to_string(),
         "project.new".to_string(),
+        "project.assistant_get".to_string(),
         "preset.activate".to_string(),
         "mesh_inspector".to_string(),
         "object.cut_with_plane".to_string(),

@@ -154,6 +154,7 @@ pub fn eligible(object: &slicer_state::ObjectRecord) -> Result<(), RpcError> {
     if !object.operations.is_empty()
         || object.seam_facets_rle.is_some()
         || object.support_facets_rle.is_some()
+        || object.fuzzy_facets.facets_rle.is_some()
         || object.filament_facets_rle.is_some()
         || object.overrides.contains_key("fan_facets_rle")
         || object.seam_target_point.is_some()

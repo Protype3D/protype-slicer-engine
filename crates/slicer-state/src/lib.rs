@@ -13,6 +13,7 @@ pub mod autosave;
 mod history;
 pub mod host_identity;
 pub mod lockfile;
+pub mod paint;
 pub mod paths;
 pub mod persist;
 pub mod process_owner;
@@ -49,6 +50,8 @@ fn push_log(log: &mut VecDeque<EventEnvelope>, envelope: EventEnvelope) {
 #[derive(Clone)]
 pub struct StateLayer {
     inner: Arc<Mutex<Inner>>,
+    /// Order saves from multiple clients while scene edits remain available during ZIP I/O.
+    save_lock: Arc<Mutex<()>>,
     event_tx: broadcast::Sender<EventEnvelope>,
     autosave: Option<Arc<AutosaveSink>>,
     autosave_unavailable_reason: Option<String>,
@@ -56,6 +59,9 @@ pub struct StateLayer {
 
 struct Inner {
     next_event_id: u64,
+    /// Event ids marking the current project and its most recent journaled edit.
+    project_start: EventId,
+    last_edit: EventId,
     log: VecDeque<EventEnvelope>,
     project: ProjectState,
     undo: Vec<UndoEntry>,
@@ -74,8 +80,11 @@ impl StateLayer {
     pub fn new() -> Self {
         let (event_tx, _) = broadcast::channel(1024);
         Self {
+            save_lock: Arc::new(Mutex::new(())),
             inner: Arc::new(Mutex::new(Inner {
                 next_event_id: 1,
+                project_start: EventId(0),
+                last_edit: EventId(0),
                 log: VecDeque::new(),
                 project: ProjectState::default(),
                 undo: Vec::new(),
@@ -206,6 +215,12 @@ impl StateLayer {
         reducer::reduce(&mut inner.project, &event);
         let event_id = EventId(inner.next_event_id);
         inner.next_event_id += 1;
+        if matches!(event, ProjectEvent::ProjectCreated { .. }) {
+            inner.project_start = event_id;
+        }
+        if autosave::is_journaled(&event) {
+            inner.last_edit = event_id;
+        }
         let envelope = EventEnvelope {
             event_id,
             event,
@@ -250,23 +265,42 @@ impl StateLayer {
         self.inner.lock().project.clone()
     }
 
-    /// Write the project to `path` and make it the autosave's base: a crash
-    /// from here restores it with the edits after it, and a session with no
-    /// edits after it is not offered for recovery, since the file holds it.
-    ///
-    /// The file is written outside the state lock, so a slow disk does not
-    /// stall every other request. An edit that lands meanwhile is not in the
-    /// file; the base then stays where it was, and the log, which holds that
-    /// edit, still restores the window.
+    pub fn assistant(&self) -> Option<serde_json::Value> {
+        self.inner.lock().project.assistant.clone()
+    }
+
     pub fn save_to(&self, path: &std::path::Path) -> anyhow::Result<()> {
-        let (project, saved_at) = {
+        self.save_to_with_assistant(path, None)
+    }
+
+    /// An omitted update keeps the conversation, an explicit None clears it.
+    /// Commit it to the live project only after the ZIP was successfully replaced.
+    pub fn save_to_with_assistant(
+        &self,
+        path: &std::path::Path,
+        assistant: Option<Option<serde_json::Map<String, serde_json::Value>>>,
+    ) -> anyhow::Result<()> {
+        let _save = self.save_lock.lock();
+        let (mut project, project_start, last_edit) = {
             let inner = self.inner.lock();
-            (inner.project.clone(), last_event_id(&inner))
+            (inner.project.clone(), inner.project_start, inner.last_edit)
         };
+        let update_assistant = assistant.is_some();
+        if let Some(block) = assistant {
+            project.assistant = block.map(serde_json::Value::Object);
+        }
         persist::save(path, &project)?;
-        let inner = self.inner.lock();
-        if last_event_id(&inner) == saved_at {
-            self.anchor_autosave(&inner, true);
+        let mut inner = self.inner.lock();
+        if inner.project_start == project_start {
+            if update_assistant {
+                inner.project.assistant = project.assistant;
+            }
+            // A scene edit during the write is in memory but absent from the ZIP.
+            // Checkpoint it with the new conversation as recoverable work.
+            let on_disk = inner.last_edit == last_edit;
+            if on_disk || update_assistant {
+                self.anchor_autosave(&inner, on_disk);
+            }
         }
         Ok(())
     }
@@ -332,7 +366,9 @@ impl StateLayer {
     ) -> (EventEnvelope, bool) {
         let project = project.with_canonical_override_keys();
         let mut inner = self.inner.lock();
-        inner.project = project.clone();
+        inner.project = project;
+        inner.project_start = EventId(inner.next_event_id);
+        inner.last_edit = inner.project_start;
         inner.log.clear();
         inner.undo.clear();
         inner.redo.clear();
@@ -342,7 +378,7 @@ impl StateLayer {
         let envelope = EventEnvelope {
             event_id: EventId(inner.next_event_id),
             event: ProjectEvent::ProjectReplaced {
-                meta: project.meta.clone(),
+                meta: inner.project.meta.clone(),
                 path: event_path,
             },
             timestamp_ms: chrono::Utc::now().timestamp_millis(),

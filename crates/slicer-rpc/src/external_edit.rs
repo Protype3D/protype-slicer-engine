@@ -43,7 +43,7 @@ use ulid::Ulid;
 use crate::dispatch::STEP_FFI_LOCK;
 use crate::error::RpcError;
 use crate::part::frame;
-use crate::part::reconcile::clear_paint_events;
+use crate::part::reconcile::replacement_paint_events;
 
 /// Edits one call may carry. A batch is one undo step, and the bound keeps a
 /// single call from holding a blocking thread for an unbounded run of copies.
@@ -189,22 +189,22 @@ impl PreparedReplace {
         // a client never shows the new mesh with the old placement.
         let transform =
             (!frame::is_negligible(delta)).then(|| frame::shift_transform(&old.transform, delta));
+        let geometry = ObjectGeometry {
+            source_path,
+            source_hash: self.copy.hash,
+            triangle_count: self.triangle_count,
+            bounds: self.bounds,
+            step_part_index: None,
+            operations: Vec::new(),
+            body: None,
+        };
+        let paint_events = replacement_paint_events(old, &geometry, self.keep_paint);
         let mut events = vec![ProjectEvent::ObjectGeometryUpdated {
             object_id: self.object_id.clone(),
-            geometry: ObjectGeometry {
-                source_path,
-                source_hash: self.copy.hash,
-                triangle_count: self.triangle_count,
-                bounds: self.bounds,
-                step_part_index: None,
-                operations: Vec::new(),
-                body: None,
-            },
+            geometry,
             transform,
         }];
-        if !self.keep_paint {
-            events.extend(clear_paint_events(old));
-        }
+        events.extend(paint_events);
         if old.recipe.is_some() {
             events.push(ProjectEvent::ObjectRecipeSet {
                 object_id: self.object_id,

@@ -9,12 +9,16 @@ use sha2::{Digest, Sha256};
 use slicer_ffi::gcode_header;
 use slicer_ffi::CancelHandle;
 use slicer_ffi::OptionJoinKind;
+use slicer_state::paint::{validate_facets_rle, validate_paint_runs};
+use slicer_state::persist::{
+    assistant_json_depth, MAX_ASSISTANT_JSON_BYTES, MAX_ASSISTANT_JSON_DEPTH,
+};
 use slicer_state::{ObjectRecord, StateLayer};
 use slicer_types::{
     canonical_override_key, is_overridable, object_override_constraint, AdaptiveRule, Bounds,
-    ObjectId, Preset, PresetId, PresetKind, PresetSource, ProjectEvent, ProjectMeta,
-    ResolvedExtruderConfig, ResolvedRoleMapping, ResolvedSliceConfig, SettingConstraint,
-    SettingKey, SettingScope, SettingValue, SettingsSchema,
+    ObjectId, ObjectOverridePatch, Preset, PresetId, PresetKind, PresetSource, ProjectEvent,
+    ProjectMeta, ResolvedExtruderConfig, ResolvedRoleMapping, ResolvedSliceConfig,
+    SettingConstraint, SettingKey, SettingScope, SettingValue, SettingsSchema,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -264,7 +268,7 @@ fn edit_mesh_cache_paths(
     let stem = format!("editmesh-{}-{}", source_hash, part_index.unwrap_or(0));
     (
         cache_root.join(format!("{stem}.stl")),
-        cache_root.join(format!("{stem}.facemap.json")),
+        cache_root.join(format!("{stem}.v2.facemap.json")),
     )
 }
 
@@ -841,48 +845,37 @@ pub struct SlicePaintMasks {
     pub seam_facets_rle: String,
     pub support_facets_rle: String,
     pub fan_facets_rle: Option<String>,
+    pub fuzzy_facets_rle: Option<String>,
     pub filament_facets_rle: Option<String>,
 }
 
-/// Seam, support and fan paint masks to forward for an object's resolved
-/// slice input (`resolve_slice_input_path`).
-///
-/// All three masks are base64 RLE blobs that index triangles BY POSITION in
-/// the object's *source* geometry, the mesh the UI paints on — set by
-/// `object.set_seam_facets` / `object.set_support_facets` /
-/// `object.set_fan_facets` (this file). That
-/// is not quite the mesh libslic3r loads, which it repairs on import; the
-/// bridge maps the difference by facet centroid (`apply_ui_facet_paint` in
-/// `protype_slicer_bridge.cpp`). The indexing is only valid for the source
-/// mesh at all: once `object.set_operations` materializes an active op stack,
-/// the sliced mesh is the post-boolean-op cache STL, and `apply_operations`'s
-/// mcut `A_NOT_B` changes both the triangle COUNT and ORDER — so a
-/// source-indexed mask applied to it lands on entirely different facets (a
-/// silent mis-paint, not a crash).
-///
-/// So the masks are forwarded ONLY while the resolved slice input is still
-/// the untouched source (`resolved_input_path == obj.source_path`) — the
-/// exact same discriminator `resolve_slice_part_index` uses, and for the same
-/// "we materialized, the old per-triangle indexing no longer applies" reason.
-/// The moment the input diverges (a materialized ops-cache mesh), both masks
-/// are dropped to empty. Keying on the resolved path rather than on
-/// `obj.operations` keeps the masks with the mesh that is actually sliced: a
-/// stack whose every op is suppressed slices the source, paint included.
-///
-/// Deliberately NON-destructive: the stored `seam_facets_rle` /
-/// `support_facets_rle` / `fan_facets_rle` are left untouched on the object, so suppressing or
-/// deleting every op (which sends `resolve_slice_input_path` back to the
-/// source — see that fn and the UI's `materializeAndReload`) restores the
-/// paint on the next slice with no repainting. Remapping a mask THROUGH the
-/// boolean op is out of scope for this foundation phase.
+/// Facet indices belong to the mesh that was painted. Seam, support, fan and
+/// filament masks index the source. Fuzzy paint may instead name the exact
+/// materialized ops mesh the window painted. A different input skips the
+/// mask for this slice, without changing the stored paint or selection rule.
 pub fn resolve_slice_paint_masks(obj: &ObjectRecord, resolved_input_path: &str) -> SlicePaintMasks {
+    let fuzzy = &obj.fuzzy_facets;
+    // This is the exact file name the window painted: null means source,
+    // "" marks a replaced mesh. If the ops cache moves, the window resolves
+    // its selection rule on the new file and resends object.set_fuzzy_facets.
+    let fuzzy_facets_rle = if !resolved_input_path.is_empty()
+        && fuzzy.mesh_path.as_deref().unwrap_or(&obj.source_path) == resolved_input_path
+    {
+        fuzzy.facets_rle.clone()
+    } else {
+        None
+    };
     if resolved_input_path != obj.source_path {
-        return SlicePaintMasks::default();
+        return SlicePaintMasks {
+            fuzzy_facets_rle,
+            ..Default::default()
+        };
     }
     SlicePaintMasks {
         seam_facets_rle: obj.seam_facets_rle.clone().unwrap_or_default(),
         support_facets_rle: obj.support_facets_rle.clone().unwrap_or_default(),
         fan_facets_rle: obj.fan_facets_rle.clone(),
+        fuzzy_facets_rle,
         filament_facets_rle: obj.filament_facets_rle.clone(),
     }
 }
@@ -907,6 +900,7 @@ pub(crate) fn object_slice_inputs(
         seam_facets_rle: masks.seam_facets_rle,
         support_facets_rle: masks.support_facets_rle,
         fan_facets_rle: masks.fan_facets_rle,
+        fuzzy_facets_rle: masks.fuzzy_facets_rle,
         filament_facets_rle: masks.filament_facets_rle,
         layer_height_profile: obj.layer_height_profile.clone(),
         layer_ranges: obj
@@ -1936,6 +1930,14 @@ struct ObjectSetFanFacetsParams {
     facets_rle: Option<String>,
 }
 #[derive(Deserialize)]
+struct ObjectSetFuzzyFacetsParams {
+    object_id: ObjectId,
+    #[serde(flatten)]
+    paint: slicer_types::FuzzyFacets,
+    #[serde(default)]
+    overrides: ObjectOverridePatch,
+}
+#[derive(Deserialize)]
 struct ObjectSetFilamentFacetsParams {
     object_id: ObjectId,
     /// `null` (or absent) clears the mask.
@@ -1970,60 +1972,7 @@ struct ObjectSetOperationsParams {
 /// micron — reject anything past a generous ceiling.
 const MAX_LAYER_HEIGHT_PROFILE_LEN: usize = 200_000;
 
-const MAX_FACETS_RLE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_TARGET_POINT_BYTES: usize = 256;
-
-/// Size cap and base64 check shared by the facet-paint setters, so a
-/// malformed blob is refused here instead of persisting to disk and surfacing
-/// later as a cryptic FFI error.
-fn validate_filament_facets_rle(rle: Option<&str>) -> Result<(), RpcError> {
-    validate_facets_rle(rle)?;
-    let Some(rle) = rle else {
-        return Ok(());
-    };
-    use base64::Engine as _;
-    let data = base64::engine::general_purpose::STANDARD
-        .decode(rle)
-        .map_err(|_| RpcError::Project("facets_rle is not valid base64".into()))?;
-    if !data.len().is_multiple_of(5) {
-        return Err(RpcError::Project(
-            "filament paint requires 5-byte RLE runs".into(),
-        ));
-    }
-    let mut total: u64 = 0;
-    for run in data.as_chunks::<5>().0 {
-        let count = u32::from_le_bytes(run[1..5].try_into().unwrap());
-        total += u64::from(count);
-        if run[0] > 16 || count == 0 || total > 20_000_000 {
-            return Err(RpcError::Project(
-                "invalid filament paint value, run or facet count".into(),
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn validate_facets_rle(facets_rle: Option<&str>) -> Result<(), RpcError> {
-    let Some(rle) = facets_rle else {
-        return Ok(());
-    };
-    if rle.len() > MAX_FACETS_RLE_BYTES {
-        return Err(RpcError::Project(format!(
-            "facets_rle exceeds {} bytes",
-            MAX_FACETS_RLE_BYTES
-        )));
-    }
-    use base64::Engine as _;
-    if base64::engine::general_purpose::STANDARD
-        .decode(rle.as_bytes())
-        .is_err()
-    {
-        return Err(RpcError::Project(
-            "facets_rle is not valid base64".to_string(),
-        ));
-    }
-    Ok(())
-}
 
 #[derive(Deserialize)]
 struct ObjectTransformParams {
@@ -2044,6 +1993,42 @@ struct AdaptiveRuleIdParams {
 
 #[derive(Deserialize)]
 struct ProjectSavePathParams {
+    #[serde(flatten)]
+    destination: ProjectPathParams,
+    #[serde(default, deserialize_with = "deserialize_assistant_update")]
+    assistant: Option<Option<serde_json::Map<String, Value>>>,
+}
+
+/// Serde calls this only for a present field. Keep an explicit null distinct
+/// from the field default so older clients preserve the project's conversation.
+fn deserialize_assistant_update<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Option<serde_json::Map<String, Value>>>, D::Error> {
+    use serde::de::Error;
+    let value = Value::deserialize(deserializer)?;
+    match value {
+        Value::Null => Ok(Some(None)),
+        Value::Object(_) if assistant_json_depth(&value) > MAX_ASSISTANT_JSON_DEPTH => {
+            Err(D::Error::custom(format_args!(
+                "assistant exceeds {MAX_ASSISTANT_JSON_DEPTH} levels"
+            )))
+        }
+        Value::Object(object) => {
+            if serde_json::to_vec(&object).map_err(D::Error::custom)?.len()
+                > MAX_ASSISTANT_JSON_BYTES
+            {
+                return Err(D::Error::custom(format_args!(
+                    "assistant exceeds {MAX_ASSISTANT_JSON_BYTES} bytes of compact JSON"
+                )));
+            }
+            Ok(Some(Some(object)))
+        }
+        _ => Err(D::Error::custom("assistant must be an object or null")),
+    }
+}
+
+#[derive(Deserialize)]
+struct ProjectPathParams {
     path: String,
     /// Take over a lock of another host. Same-host live-pid locks are
     /// never overridden via this flag; the user must close the other
@@ -2716,11 +2701,6 @@ impl Dispatcher {
                 // Stored under the key clients read and clear, so a legacy
                 // spelling (`perimeter_count`) cannot outlive a cleared override.
                 let key = canonical_override_key(&p.key).to_string();
-                if !is_overridable(&key) {
-                    return Err(RpcError::Project(format!(
-                        "key '{key}' is not overridable per-object"
-                    )));
-                }
                 let snap = self.state.snapshot();
                 if !snap.objects.contains_key(&p.object_id) {
                     return Err(RpcError::Project(format!(
@@ -2728,26 +2708,7 @@ impl Dispatcher {
                         p.object_id
                     )));
                 }
-                if let Some(ref v) = p.value {
-                    if key == "extruder" {
-                        // Per-object extruder is a libslic3r ModelObject config
-                        // key (1-based), not a schema Process setting, so the
-                        // schema-driven validate_setting has no def for it.
-                        // Validate inline: a positive 1-based integer.
-                        match v {
-                            SettingValue::Int(n) if (1..=16).contains(n) => {}
-                            _ => {
-                                return Err(RpcError::Project(format!(
-                                    "extruder must be a 1-based integer from 1 to 16, got {v:?}"
-                                )));
-                            }
-                        }
-                    } else if let Some(constraint) = object_override_constraint(&key) {
-                        validate_constraint(&key, &constraint, v)?;
-                    } else {
-                        validate_setting(&SettingScope::Process, &key, v)?;
-                    }
-                }
+                validate_object_override(&key, p.value.as_ref())?;
                 self.state.apply(ProjectEvent::ObjectOverrideSet {
                     object_id: p.object_id,
                     key,
@@ -2758,7 +2719,7 @@ impl Dispatcher {
             "object.set_seam_facets" => {
                 let p: ObjectSetSeamFacetsParams = serde_json::from_value(params)
                     .map_err(|e| RpcError::Project(format!("invalid params: {e}")))?;
-                validate_facets_rle(p.facets_rle.as_deref())?;
+                validate_facets_rle(p.facets_rle.as_deref()).map_err(RpcError::Project)?;
                 if let Some(ref tp) = p.target_point {
                     if tp.len() > MAX_TARGET_POINT_BYTES {
                         return Err(RpcError::Project(format!(
@@ -2791,7 +2752,7 @@ impl Dispatcher {
                     p.object_id,
                     p.facets_rle.as_ref().map(|r| r.len()).unwrap_or(0),
                 );
-                validate_facets_rle(p.facets_rle.as_deref())?;
+                validate_facets_rle(p.facets_rle.as_deref()).map_err(RpcError::Project)?;
                 let snap = self.state.snapshot();
                 if !snap.objects.contains_key(&p.object_id) {
                     return Err(RpcError::Project(format!(
@@ -2809,7 +2770,7 @@ impl Dispatcher {
                 let p: ObjectSetFanFacetsParams = serde_json::from_value(params)
                     .map_err(|e| RpcError::Project(format!("invalid params: {e}")))?;
                 // Values above 147 are refused by the bridge, like the other masks'.
-                validate_facets_rle(p.facets_rle.as_deref())?;
+                validate_facets_rle(p.facets_rle.as_deref()).map_err(RpcError::Project)?;
                 let snap = self.state.snapshot();
                 if !snap.objects.contains_key(&p.object_id) {
                     return Err(RpcError::Project(format!(
@@ -2823,11 +2784,45 @@ impl Dispatcher {
                 });
                 Ok(json!({}))
             }
+            "object.set_fuzzy_facets" => {
+                let p: ObjectSetFuzzyFacetsParams = serde_json::from_value(params)
+                    .map_err(|e| RpcError::Project(format!("invalid params: {e}")))?;
+                validate_paint_runs(p.paint.facets_rle.as_deref(), "fuzzy", 2)
+                    .map_err(RpcError::Project)?;
+                for (key, value) in &p.overrides {
+                    if !key.starts_with("fuzzy_skin") {
+                        return Err(RpcError::Project(format!(
+                            "only fuzzy_skin overrides are allowed here, got '{key}'"
+                        )));
+                    }
+                    validate_object_override(key, value.as_ref())?;
+                }
+                self.state.transaction(|txn| {
+                    if !txn.project().objects.contains_key(&p.object_id) {
+                        return Err(RpcError::Project(format!(
+                            "object_id not found: {:?}",
+                            p.object_id
+                        )));
+                    }
+                    txn.apply(ProjectEvent::ObjectFuzzyFacetsSet {
+                        object_id: p.object_id,
+                        paint: if p.paint.facets_rle.is_some() {
+                            p.paint
+                        } else {
+                            Default::default()
+                        },
+                        overrides: p.overrides,
+                    });
+                    Ok(())
+                })?;
+                Ok(json!({}))
+            }
             "object.set_filament_facets" => {
                 let p: ObjectSetFilamentFacetsParams = serde_json::from_value(params)
                     .map_err(|e| RpcError::Project(format!("invalid params: {e}")))?;
                 // Material 0 is unpainted; 1..16 are the virtual filament slots.
-                validate_filament_facets_rle(p.facets_rle.as_deref())?;
+                validate_paint_runs(p.facets_rle.as_deref(), "filament", 16)
+                    .map_err(RpcError::Project)?;
                 let snap = self.state.snapshot();
                 if !snap.objects.contains_key(&p.object_id) {
                     return Err(RpcError::Project(format!(
@@ -3277,8 +3272,9 @@ impl Dispatcher {
                 Ok(json!({}))
             }
             "project.save" => {
-                let p: ProjectSavePathParams = serde_json::from_value(params)
-                    .map_err(|e| RpcError::Project(format!("invalid params: {e}")))?;
+                let save: ProjectSavePathParams = serde_json::from_value(params)
+                    .map_err(|e| RpcError::InvalidParams(e.to_string()))?;
+                let p = save.destination;
                 let path = std::path::PathBuf::from(&p.path);
                 // Acquire lock on the destination unless we already own it
                 // (saving over the currently-open project doesn't need a
@@ -3312,12 +3308,12 @@ impl Dispatcher {
                     self.state.set_current_path(Some(path.clone()));
                 }
                 self.state
-                    .save_to(&path)
+                    .save_to_with_assistant(&path, save.assistant)
                     .map_err(|e| RpcError::Project(format!("save failed: {e:#}")))?;
                 Ok(json!({ "path": p.path }))
             }
             "project.open" => {
-                let p: ProjectSavePathParams = serde_json::from_value(params)
+                let p: ProjectPathParams = serde_json::from_value(params)
                     .map_err(|e| RpcError::Project(format!("invalid params: {e}")))?;
                 let path = std::path::PathBuf::from(&p.path);
                 match acquire_project_lock(&path) {
@@ -3347,9 +3343,11 @@ impl Dispatcher {
                 if let Some(prev) = self.state.current_path() {
                     let _ = slicer_state::lockfile::release(&prev);
                 }
+                let result = json!({ "path": p.path, "assistant": loaded.assistant });
                 self.state.replace_state(loaded, Some(path));
-                Ok(json!({ "path": p.path }))
+                Ok(result)
             }
+            "project.assistant_get" => Ok(json!({ "assistant": self.state.assistant() })),
             "project.recover_list" => {
                 let current = self.state.autosave().map(|s| s.project_id().to_string());
                 let root = self.autosave_root()?;
@@ -3452,6 +3450,9 @@ impl Dispatcher {
                             "seam_target_point": o.seam_target_point,
                             "support_facets_rle": o.support_facets_rle,
                             "fan_facets_rle": o.fan_facets_rle,
+                            "fuzzy_facets_rle": o.fuzzy_facets.facets_rle,
+                            "fuzzy_facets_mesh": o.fuzzy_facets.mesh_path,
+                            "fuzzy_overlay": o.fuzzy_facets.overlay,
                             "filament_facets_rle": o.filament_facets_rle,
                             // Layer ranges as `LayerConfigRange` serializes
                             // them (`fan` omitted when unset): the UI rebuilds
@@ -4275,6 +4276,44 @@ fn kind_for_scope(scope: SettingScope) -> PresetKind {
     }
 }
 
+fn validate_object_override(
+    key: &SettingKey,
+    value: Option<&SettingValue>,
+) -> Result<(), RpcError> {
+    if !is_overridable(key) {
+        return Err(RpcError::Project(format!(
+            "key '{key}' is not overridable per-object"
+        )));
+    }
+    let Some(v) = value else {
+        return Ok(());
+    };
+    if key == "fuzzy_skin_point_distance" && matches!(v, SettingValue::Number(n) if *n <= 0.) {
+        return Err(RpcError::Project(format!(
+            "{key} must be positive (> 0 mm)"
+        )));
+    }
+    if key == "extruder" {
+        // Per-object extruder is a libslic3r ModelObject config
+        // key (1-based), not a schema Process setting, so the
+        // schema-driven validate_setting has no def for it.
+        // Validate inline: a positive 1-based integer.
+        match v {
+            SettingValue::Int(n) if (1..=16).contains(n) => {}
+            _ => {
+                return Err(RpcError::Project(format!(
+                    "extruder must be a 1-based integer from 1 to 16, got {v:?}"
+                )));
+            }
+        }
+    } else if let Some(constraint) = object_override_constraint(key) {
+        validate_constraint(key, &constraint, v)?;
+    } else {
+        validate_setting(&SettingScope::Process, key, v)?;
+    }
+    Ok(())
+}
+
 fn validate_setting(
     scope: &SettingScope,
     key: &SettingKey,
@@ -4601,6 +4640,7 @@ mod tests {
             seam_target_point: None,
             support_facets_rle: None,
             fan_facets_rle: None,
+            fuzzy_facets: Default::default(),
             filament_facets_rle: None,
             layer_height_profile: Vec::new(),
             layer_ranges: Vec::new(),

@@ -11,6 +11,7 @@ pub fn reduce(state: &mut ProjectState, event: &ProjectEvent) {
             // setup — settings, active presets, the preset library — belongs
             // to the session and carries over.
             state.meta = Some(meta.clone());
+            state.assistant = None;
             state.objects.clear();
             state.adaptive_rules.clear();
             state.parts.clear();
@@ -69,6 +70,7 @@ pub fn reduce(state: &mut ProjectState, event: &ProjectEvent) {
                     seam_target_point: None,
                     support_facets_rle: None,
                     fan_facets_rle: None,
+                    fuzzy_facets: Default::default(),
                     filament_facets_rle: None,
                     layer_height_profile: Vec::new(),
                     layer_ranges: Vec::new(),
@@ -117,14 +119,7 @@ pub fn reduce(state: &mut ProjectState, event: &ProjectEvent) {
             new_value,
         } => {
             if let Some(obj) = state.objects.get_mut(object_id) {
-                match new_value {
-                    Some(v) => {
-                        obj.overrides.insert(key.clone(), v.clone());
-                    }
-                    None => {
-                        obj.overrides.remove(key);
-                    }
-                }
+                apply_override(obj, key, new_value);
             }
         }
         ProjectEvent::ObjectSeamFacetsSet {
@@ -151,6 +146,18 @@ pub fn reduce(state: &mut ProjectState, event: &ProjectEvent) {
         } => {
             if let Some(obj) = state.objects.get_mut(object_id) {
                 obj.fan_facets_rle = facets_rle.clone();
+            }
+        }
+        ProjectEvent::ObjectFuzzyFacetsSet {
+            object_id,
+            paint,
+            overrides,
+        } => {
+            if let Some(obj) = state.objects.get_mut(object_id) {
+                obj.fuzzy_facets = paint.clone();
+                for (key, value) in overrides {
+                    apply_override(obj, key, value);
+                }
             }
         }
         ProjectEvent::ObjectFilamentFacetsSet {
@@ -249,6 +256,17 @@ fn identity_matrix() -> [f32; 16] {
         0.0, 0.0, 1.0, 0.0, //
         0.0, 0.0, 0.0, 1.0, //
     ]
+}
+
+fn apply_override(obj: &mut ObjectRecord, key: &str, value: &Option<slicer_types::SettingValue>) {
+    match value {
+        Some(v) => {
+            obj.overrides.insert(key.to_owned(), v.clone());
+        }
+        None => {
+            obj.overrides.remove(key);
+        }
+    }
 }
 
 #[cfg(test)]

@@ -1,6 +1,14 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+/// Triangle paint, its mesh identity and the window's selection rule form one undo step.
+#[derive(Debug, Default, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+pub struct FuzzyFacets {
+    pub facets_rle: Option<String>,
+    pub mesh_path: Option<String>,
+    pub overlay: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Hash)]
 pub struct ProjectId(pub String);
 

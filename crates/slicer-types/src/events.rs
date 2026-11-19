@@ -5,6 +5,10 @@ use crate::project::*;
 use crate::settings::{SettingKey, SettingScope, SettingValue};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+
+/// Only listed keys change. A null value clears that object override.
+pub type ObjectOverridePatch = BTreeMap<SettingKey, Option<SettingValue>>;
 
 #[derive(
     Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
@@ -156,6 +160,13 @@ pub enum ProjectEvent {
     ObjectFanFacetsSet {
         object_id: ObjectId,
         facets_rle: Option<String>,
+    },
+    ObjectFuzzyFacetsSet {
+        object_id: ObjectId,
+        #[serde(flatten)]
+        paint: FuzzyFacets,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        overrides: ObjectOverridePatch,
     },
     ObjectFilamentFacetsSet {
         object_id: ObjectId,

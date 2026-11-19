@@ -6,6 +6,8 @@ use thiserror::Error;
 #[derive(Debug, Error, Serialize)]
 #[serde(tag = "kind")]
 pub enum RpcError {
+    #[error("invalid params: {0}")]
+    InvalidParams(String),
     #[error("invalid token")]
     InvalidToken,
     #[error("protocol version mismatch: client {client}, server {server}")]
@@ -33,6 +35,7 @@ pub enum RpcError {
 impl RpcError {
     pub fn code(&self) -> i32 {
         match self {
+            RpcError::InvalidParams(_) => -32602,
             RpcError::InvalidToken => -32001,
             RpcError::VersionMismatch { .. } => -32002,
             RpcError::Internal(_) => -32603,

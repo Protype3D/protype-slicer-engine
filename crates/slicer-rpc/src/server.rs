@@ -64,7 +64,10 @@ pub async fn start_server(state: StateLayer, requested_port: u16) -> Result<Serv
 }
 
 async fn ws_handler(State(state): State<ServerState>, ws: WebSocketUpgrade) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, state))
+    // A 16 MiB assistant object plus its RPC envelope exceeds the default
+    // single-frame limit. Keep the existing 64 MiB message ceiling.
+    ws.max_frame_size(64 * 1024 * 1024)
+        .on_upgrade(move |socket| handle_socket(socket, state))
 }
 
 async fn handle_socket(mut socket: WebSocket, state: ServerState) {

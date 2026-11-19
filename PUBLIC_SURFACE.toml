@@ -64,6 +64,7 @@ methods = [
     "object.serial_candidates",
     "object.set_fan_facets",
     "object.set_filament_facets",
+    "object.set_fuzzy_facets",
     "object.set_layer_height_profile",
     "object.set_layer_ranges",
     "object.set_operations",
@@ -87,6 +88,8 @@ methods = [
     # Почему не в воркере: файлы мешей принадлежат демону — общий метод 2
     # спеки тонкого демона; воркер кладёт деталь в проект только через него.
     "project.apply_external_edit",
+    # Демон владеет открытым проектом и его базой восстановления.
+    "project.assistant_get",
     "project.discard_autosave",
     "project.discard_recovery",
     "project.export_gcode",
@@ -136,6 +139,7 @@ capabilities = [
     "object.set_operations.hole_heads",
     "part_document",
     "preset.activate",
+    "project.assistant_get",
     "project.new",
     "serial_marking_column_v1",
     "serial_marking_short_v1",

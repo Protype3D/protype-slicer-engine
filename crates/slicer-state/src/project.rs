@@ -3,6 +3,8 @@ use std::collections::{BTreeMap, HashMap};
 
 #[derive(Debug, Clone)]
 pub struct ProjectState {
+    /// Opaque window-owned conversation saved alongside the scene.
+    pub assistant: Option<serde_json::Value>,
     pub meta: Option<ProjectMeta>,
     pub presets: PresetState,
     pub objects: BTreeMap<ObjectId, ObjectRecord>,
@@ -59,6 +61,7 @@ pub struct ObjectRecord {
     /// Base64 RLE fan-paint blob (`ProjectEvent::ObjectFanFacetsSet`). `None`
     /// means no facet of this object has a painted fan speed.
     pub fan_facets_rle: Option<String>,
+    pub fuzzy_facets: FuzzyFacets,
     pub filament_facets_rle: Option<String>,
     /// Per-object variable-layer-height profile: a flat list of
     /// `[z0, h0, z1, h1, ...]` (z mm, height mm), ascending z. Maps 1:1
@@ -154,6 +157,7 @@ impl Default for ProjectState {
             preset_library.insert(p.id.clone(), p);
         }
         Self {
+            assistant: None,
             meta: None,
             presets: PresetState {
                 active_printer: PresetId("cd400-default".into()),

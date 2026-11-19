@@ -70,6 +70,7 @@ fn left_behind(object: &ObjectRecord) -> Vec<&'static str> {
         (object.seam_target_point.is_some(), "seam_target_point"),
         (object.support_facets_rle.is_some(), "support_paint"),
         (object.fan_facets_rle.is_some(), "fan_paint"),
+        (object.fuzzy_facets.facets_rle.is_some(), "fuzzy_paint"),
         (object.filament_facets_rle.is_some(), "filament_paint"),
         (
             !object.layer_height_profile.is_empty(),
