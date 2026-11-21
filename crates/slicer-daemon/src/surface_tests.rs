@@ -8,7 +8,9 @@
 
 use super::Cli;
 use clap::CommandFactory;
-use slicer_rpc::methods::{capabilities, METHODS, NOTIFICATIONS, SERVER_METHODS};
+use slicer_rpc::methods::{
+    capabilities, METHODS, NOTIFICATIONS, OCCT_CAPABILITIES, SERVER_METHODS,
+};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use toml::{Table, Value};
@@ -231,11 +233,20 @@ fn server_methods_and_notifications_match_public_surface() {
 
 #[test]
 fn capabilities_match_public_surface() {
+    let surface = surface();
+    let mut listed = string_list(&surface, "rpc", "capabilities");
+    let conditional = string_list(&surface, "rpc", "capabilities_with_libslic3r");
     assert_matches_surface(
-        "capabilities",
-        capabilities(),
-        string_list(&surface(), "rpc", "capabilities"),
+        "OCCT capabilities",
+        sorted(OCCT_CAPABILITIES.iter().copied()),
+        conditional.clone(),
     );
+    if cfg!(feature = "with-libslic3r") {
+        assert_eq!(listed, sorted(listed.clone()));
+        listed.extend(conditional);
+        listed.sort();
+    }
+    assert_matches_surface("capabilities", capabilities(), listed);
 }
 
 #[test]

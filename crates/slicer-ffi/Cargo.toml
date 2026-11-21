@@ -25,6 +25,7 @@ cxx = { workspace = true }
 serde = { workspace = true }
 png = { workspace = true }
 slicer-geometry = { path = "../slicer-geometry", optional = true }
+tempfile = "3"
 
 [dev-dependencies]
 sha2 = { workspace = true }

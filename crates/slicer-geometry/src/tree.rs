@@ -791,6 +791,11 @@ struct ExclusiveOps {
 }
 
 impl CsgNode {
+    /// First mesh-only operation in a validated tree, including nested operations.
+    pub fn mesh_only_op(&self) -> Option<&'static str> {
+        self.exclusive_ops().mesh
+    }
+
     fn exclusive_ops(&self) -> ExclusiveOps {
         let own = ExclusiveOps {
             brep: (self.own_need() == KernelNeed::BrepOnly).then(|| self.op_name()),

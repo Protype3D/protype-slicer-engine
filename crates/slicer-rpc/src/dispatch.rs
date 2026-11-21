@@ -2350,6 +2350,11 @@ impl Dispatcher {
                     .await
                     .map_err(|e| RpcError::Project(format!("serial marking task failed: {e}")))?
             }
+            "geometry.export_step" => {
+                tokio::task::spawn_blocking(move || crate::geometry::export_step::handle(params))
+                    .await
+                    .map_err(|e| RpcError::Internal(format!("STEP export task failed: {e}")))?
+            }
             "geometry.build" => {
                 // From the tree alone: a `recipe` is the client's own, and an
                 // `object_id` in it is not a reference to resolve.

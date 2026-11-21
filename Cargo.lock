@@ -1477,6 +1477,7 @@ dependencies = [
  "slicer-rpc",
  "slicer-state",
  "slicer-types",
+ "tempfile",
  "tokio",
  "tokio-tungstenite 0.21.0",
  "toml",
@@ -1495,6 +1496,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "slicer-geometry",
+ "tempfile",
 ]
 
 [[package]]
@@ -1580,6 +1582,7 @@ dependencies = [
  "slicer-state",
  "slicer-types",
  "slicer-verify",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tokio-tungstenite 0.21.0",

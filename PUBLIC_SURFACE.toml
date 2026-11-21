@@ -42,6 +42,8 @@ methods = [
     "gcode.select_tool",
     "geometry.build",
     "geometry.engrave_serial",
+    # Использует кэш B-rep демона и его мост к XCAF в OCCT.
+    "geometry.export_step",
     "hello",
     "history.get",
     "history.goto",
@@ -153,6 +155,9 @@ capabilities = [
     "slice.estimate",
     "verify.selftest",
 ]
+
+# Возможности сборки с OCCT (дополняют capabilities в hello).
+capabilities_with_libslic3r = ["geometry.export_step_v1"]
 
 [cli]
 # Подкоманды `protype-slicer-daemon`, по именам clap.

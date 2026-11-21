@@ -21,6 +21,7 @@ use crate::error::RpcError;
 use crate::mesh::ObjectMeshes;
 use crate::part::kernel::KernelOutput;
 
+pub(crate) mod export_step;
 mod imports;
 
 #[derive(Debug, Deserialize)]
@@ -467,7 +468,10 @@ fn write_brep_atomically(
     final_path: &Path,
     build: impl FnOnce(&Path) -> Result<Part, BrepFailure>,
 ) -> Result<Part, BrepFailure> {
-    write_atomically(final_path, build, BrepFailure::Unavailable)
+    let part = write_atomically(final_path, build, BrepFailure::Unavailable)?;
+    #[cfg(feature = "with-libslic3r")]
+    export_step::cache_volume(final_path, part.volume_mm3);
+    Ok(part)
 }
 
 /// Ask OCCT for the part, writing it to `out` as STEP.

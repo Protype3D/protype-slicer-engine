@@ -84,6 +84,13 @@
 #include <admesh/stl.h>
 #include <STEPCAFControl_Reader.hxx>
 #include <STEPControl_Writer.hxx>
+#include <STEPCAFControl_Writer.hxx>
+#include <STEPControl_Controller.hxx>
+#include <Interface_Static.hxx>
+#include <XCAFDoc_ColorTool.hxx>
+#include <Quantity_Color.hxx>
+#include <BRepBuilderAPI_GTransform.hxx>
+#include <BRep_Builder.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRepPrimAPI_MakeCone.hxx>
@@ -1539,6 +1546,21 @@ void collect_solids_recursive(
     }
 }
 
+// Own the XCAF document for the duration of a locked STEP operation, also
+// closing it in the application registry when an OCCT operation throws.
+struct StepDocument {
+    Handle(XCAFApp_Application) app = XCAFApp_Application::GetApplication();
+    Handle(TDocStd_Document) doc;
+    StepDocument() { app->NewDocument(TCollection_ExtendedString("BinXCAF"), doc); }
+    ~StepDocument() { app->Close(doc); }
+    bool read(const std::string& path) {
+        STEPCAFControl_Reader reader;
+        reader.SetNameMode(true);
+        reader.SetColorMode(true);
+        return reader.ReadFile(path.c_str()) == IFSelect_RetDone && reader.Transfer(doc);
+    }
+};
+
 // Load a STEP file and return its solids in the exact order upstream
 // `load_step` imports them (STEPCAFControl_Reader + XCAF free-shape
 // traversal). On failure `err` is set and the vector is empty.
@@ -1557,19 +1579,13 @@ std::vector<TopoDS_Shape> collect_step_solids_in_upstream_order(
     // read_from_step in load_model_for_path.
     std::lock_guard<std::mutex> occt_lock(occt_step_mutex());
     std::vector<TopoDS_Shape> solids;
-    Handle(TDocStd_Document) document;
-    Handle(XCAFApp_Application) application = XCAFApp_Application::GetApplication();
-    application->NewDocument(TCollection_ExtendedString("BinXCAF"), document);
-    STEPCAFControl_Reader reader;
-    reader.SetNameMode(true);
-    const IFSelect_ReturnStatus stat = reader.ReadFile(path.c_str());
-    if (stat != IFSelect_RetDone || !reader.Transfer(document)) {
-        application->Close(document);
+    StepDocument document;
+    if (!document.read(path)) {
         err = std::string("could not read STEP file '") + path + "'";
         return solids;
     }
     Handle(XCAFDoc_ShapeTool) shapeTool =
-        XCAFDoc_DocumentTool::ShapeTool(document->Main());
+        XCAFDoc_DocumentTool::ShapeTool(document.doc->Main());
     TDF_LabelSequence topLevelShapes;
     shapeTool->GetFreeShapes(topLevelShapes);
     const Standard_Integer topShapeLength = topLevelShapes.Length() + 1;
@@ -1577,8 +1593,6 @@ std::vector<TopoDS_Shape> collect_step_solids_in_upstream_order(
         collect_solids_recursive(
             TopLoc_Location{}, shapeTool, topLevelShapes.Value(iLabel), solids);
     }
-    shapeTool.Nullify();
-    application->Close(document);
     return solids;
 }
 
@@ -5385,6 +5399,239 @@ bool brep_write_step(uint64_t handle, rust::Str out_path) {
     (void)handle; (void)out_path;
     return false;
 #endif
+}
+
+#ifdef WITH_LIBSLIC3R
+namespace {
+double step_volume(const TopoDS_Shape& shape) {
+    GProp_GProps props;
+    BRepGProp::VolumeProperties(shape, props);
+    return props.Mass();
+}
+
+TopoDS_Shape export_shape(const std::vector<TopoDS_Shape>& solids,
+                          const std::array<double, 3>& scale) {
+    TopoDS_Shape shape = solids.front();
+    if (solids.size() > 1) {
+        TopoDS_Compound group;
+        BRep_Builder builder;
+        builder.MakeCompound(group);
+        for (const auto& solid : solids) builder.Add(group, solid);
+        shape = group;
+    }
+    if (scale[0] == scale[1] && scale[1] == scale[2]) {
+        if (scale[0] == 1.0) return shape;
+        gp_Trsf trsf;
+        trsf.SetScale(gp_Pnt(0, 0, 0), scale[0]);
+        return BRepBuilderAPI_Transform(shape, trsf, true).Shape();
+    }
+    gp_GTrsf trsf;
+    for (int i = 0; i < 3; ++i) trsf.SetValue(i + 1, i + 1, scale[i]);
+    return BRepBuilderAPI_GTransform(shape, trsf, true).Shape();
+}
+
+uint32_t shape_count(const TopoDS_Shape& shape, TopAbs_ShapeEnum type) {
+    TopTools_IndexedMapOfShape items;
+    TopExp::MapShapes(shape, type, items);
+    return items.Extent();
+}
+
+// Caller holds occt_step_mutex throughout transfer.
+void write_ap242(rust::Slice<const StepExportPart> parts, const std::vector<TopoDS_Shape>& shapes,
+                 const std::string& path, StepExportError& error) {
+    STEPControl_Controller::Init();
+    const std::string schema = Interface_Static::CVal("write.step.schema");
+    const std::string unit = Interface_Static::CVal("write.step.unit");
+    Slic3r::ScopeGuard restore([&] {
+        Interface_Static::SetCVal("write.step.schema", schema.c_str());
+        Interface_Static::SetCVal("write.step.unit", unit.c_str());
+    });
+    if (!Interface_Static::SetCVal("write.step.schema", "AP242DIS") ||
+        !Interface_Static::SetCVal("write.step.unit", "MM")) {
+        throw std::runtime_error("OCCT refused STEP AP242DIS in millimetres");
+    }
+
+    StepDocument output;
+    auto shape_tool = XCAFDoc_DocumentTool::ShapeTool(output.doc->Main());
+    auto colors = XCAFDoc_DocumentTool::ColorTool(output.doc->Main());
+    for (size_t i = 0; i < parts.size(); ++i) {
+        const auto& part = parts[i];
+        error.part = part.name;
+        auto label = shape_tool->AddShape(shapes[i], false);
+        TDataStd_Name::Set(label, TCollection_ExtendedString(std::string(part.name).c_str(), true));
+        if (part.has_color) {
+            const auto& c = part.color;
+            const Quantity_Color color(c[0], c[1], c[2], Quantity_TOC_sRGB);
+            colors->SetColor(label, color, XCAFDoc_ColorSurf);
+            if (shapes[i].ShapeType() != TopAbs_SOLID) {
+                for (TopExp_Explorer it(shapes[i], TopAbs_SOLID); it.More(); it.Next()) {
+                    const auto body = shape_tool->AddSubShape(label, it.Current());
+                    if (body.IsNull()) throw std::runtime_error("could not label a solid for STEP color");
+                    colors->SetColor(body, color, XCAFDoc_ColorSurf);
+                }
+            }
+        }
+    }
+    error.part = "";
+    STEPCAFControl_Writer writer;
+    writer.SetNameMode(true);
+    writer.SetColorMode(true);
+    if (!writer.Transfer(output.doc, STEPControl_AsIs) || writer.Write(path.c_str()) != IFSelect_RetDone) {
+        throw std::runtime_error("could not write STEP AP242 document");
+    }
+}
+
+// OCCT can restore a compound's surface style on its individual solids.
+bool has_step_surface_color(const Handle(XCAFDoc_ColorTool)& colors, const TDF_Label& label,
+                            const TopoDS_Shape& shape, const Quantity_Color& expected) {
+    Quantity_Color color;
+    const bool inherited = colors->GetColor(label, XCAFDoc_ColorSurf, color)
+                           && color.Distance(expected) <= 1e-5;
+    TopExp_Explorer solid(shape, TopAbs_SOLID);
+    if (!solid.More()) return inherited;
+    for (; solid.More(); solid.Next()) {
+        if (colors->GetColor(solid.Current(), XCAFDoc_ColorSurf, color)) {
+            if (color.Distance(expected) > 1e-5) return false;
+        } else if (!inherited) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void verify_ap242(rust::Slice<const StepExportPart> parts, rust::Slice<const double> expected,
+                  const std::string& path, StepExportResult& result) {
+    if (expected.size() != parts.size()) {
+        result.error.reason = "missing reference volumes for STEP verification";
+        return;
+    }
+    StepDocument check;
+    if (!check.read(path)) {
+        result.error.reason = "could not read the exported STEP document";
+        return;
+    }
+    auto read_shapes = XCAFDoc_DocumentTool::ShapeTool(check.doc->Main());
+    auto read_colors = XCAFDoc_DocumentTool::ColorTool(check.doc->Main());
+    TDF_LabelSequence labels;
+    read_shapes->GetFreeShapes(labels);
+    if (size_t(labels.Length()) != parts.size()) {
+        result.error.reason = "exported STEP contains the wrong number of parts";
+        return;
+    }
+    for (size_t i = 0; i < parts.size(); ++i) {
+        const auto& label = labels.Value(i + 1);
+        result.error.part = parts[i].name;
+        const auto shape = read_shapes->GetShape(label);
+        if (shape.IsNull()) {
+            result.error.reason = "could not read the exported STEP part shape";
+            return;
+        }
+        Handle(TDataStd_Name) name;
+        if (!label.FindAttribute(TDataStd_Name::GetID(), name) ||
+            !name->Get().IsEqual(TCollection_ExtendedString(std::string(parts[i].name).c_str(), true))) {
+            result.error.reason = "exported STEP did not preserve the part name";
+            return;
+        }
+        if (parts[i].has_color) {
+            const auto& c = parts[i].color;
+            if (!has_step_surface_color(read_colors, label, shape,
+                                        Quantity_Color(c[0], c[1], c[2], Quantity_TOC_sRGB))) {
+                result.error.reason = "exported STEP did not preserve the surface color";
+                return;
+            }
+        }
+        const double volume = step_volume(shape);
+        if (!std::isfinite(volume) || !std::isfinite(expected[i]) || expected[i] <= 0 ||
+            std::abs(volume - expected[i]) > 0.005 * expected[i]) {
+            result.error.has_volume = true;
+            result.error.expected = expected[i];
+            result.error.actual = volume;
+            result.error.reason = "round-trip volume differs from the original solid";
+            return;
+        }
+        result.stats.push_back(StepExportStats{
+            rust::String(TCollection_AsciiString(name->Get()).ToCString()), volume,
+            shape_count(shape, TopAbs_FACE), shape_count(shape, TopAbs_SOLID)});
+    }
+    result.error = {};
+}
+
+// Standard_Failure is outside the std::exception hierarchy.
+rust::String step_export_exception_reason() {
+    try {
+        throw;
+    } catch (const Standard_Failure& e) {
+        const char* message = e.GetMessageString();
+        return message && *message ? message : "OCCT export failure";
+    } catch (const std::exception& e) {
+        return *e.what() ? e.what() : "STEP export failure";
+    } catch (...) {
+        return "unexpected OCCT export failure";
+    }
+}
+}  // namespace
+#endif
+
+StepExportResult verify_export_step(rust::Slice<const StepExportPart> parts,
+                                    rust::Slice<const double> volumes, rust::Str path) {
+    StepExportResult result{};
+    result.error.kind = "verify_failed";
+#ifdef WITH_LIBSLIC3R
+    try {
+        std::lock_guard<std::mutex> lock(occt_step_mutex());
+        verify_ap242(parts, volumes, std::string(path), result);
+    } catch (...) {
+        result.error.reason = step_export_exception_reason();
+    }
+#else
+    (void)parts; (void)volumes; (void)path;
+    result.error.reason = "this daemon was built without OCCT";
+#endif
+    return result;
+}
+
+StepExportResult export_step(rust::Slice<const StepExportPart> parts, rust::Str out_path) {
+    StepExportResult result{};
+    result.error.kind = "write_failed";
+#ifdef WITH_LIBSLIC3R
+    try {
+        std::vector<TopoDS_Shape> shapes;
+        std::vector<double> expected;
+        for (size_t i = 0; i < parts.size(); ++i) {
+            const auto& part = parts[i];
+            result.error.part = part.name;
+            result.error.kind = part.source_volume == 0 ? "read_failed" : "build_failed";
+            std::string error;
+            auto solids = collect_step_solids_in_upstream_order(std::string(part.path), error);
+            if (solids.empty()) {
+                result.error.reason = error.empty() ? "STEP contains no shapes" : error;
+                return result;
+            }
+            result.error.kind = "build_failed";
+            double volume = part.source_volume;
+            if (volume == 0) {
+                for (const auto& solid : solids) volume += step_volume(solid);
+            }
+            expected.push_back(volume * part.scale[0] * part.scale[1] * part.scale[2]);
+            shapes.push_back(export_shape(solids, part.scale));
+        }
+
+        result.error.kind = "write_failed";
+        result.error.part = "";
+        {
+            std::lock_guard<std::mutex> lock(occt_step_mutex());
+            write_ap242(parts, shapes, std::string(out_path), result.error);
+        }
+        encode_step_file(out_path);
+        return verify_export_step(parts, {expected.data(), expected.size()}, out_path);
+    } catch (...) {
+        result.error.reason = step_export_exception_reason();
+    }
+#else
+    (void)parts; (void)out_path;
+    result.error.reason = "this daemon was built without OCCT";
+#endif
+    return result;
 }
 
 void brep_release(uint64_t handle) {

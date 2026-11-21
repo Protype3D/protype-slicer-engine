@@ -55,6 +55,7 @@ pub const METHODS: &[&str] = &[
     "gcode.select_tool",
     "geometry.build",
     "geometry.engrave_serial",
+    "geometry.export_step",
     "hello",
     "history.get",
     "history.goto",
@@ -152,6 +153,9 @@ pub const SERVER_METHODS: &[&str] = &[GOODBYE];
 /// Messages the daemon sends to a client without a request.
 pub const NOTIFICATIONS: &[&str] = &[EVENT_NOTIFICATION, HISTORY_NOTIFICATION];
 
+/// Additional capabilities advertised only when this crate includes the OCCT kernel.
+pub const OCCT_CAPABILITIES: &[&str] = &["geometry.export_step_v1"];
+
 /// Capabilities advertised in `hello.capabilities` — the single source of
 /// truth for both entry points that report them: the real client-facing
 /// WS handshake (`server.rs`'s `handle_socket`, pre-auth, returns the
@@ -160,7 +164,7 @@ pub const NOTIFICATIONS: &[&str] = &[EVENT_NOTIFICATION, HISTORY_NOTIFICATION];
 /// function means the two can't drift apart. In advertised order, which is
 /// not alphabetical; `PUBLIC_SURFACE.toml` lists the same set sorted.
 pub fn capabilities() -> Vec<String> {
-    vec![
+    let mut capabilities = vec![
         "events.subscribe".to_string(),
         "history".to_string(),
         "project.new".to_string(),
@@ -186,5 +190,9 @@ pub fn capabilities() -> Vec<String> {
         "part_document".to_string(),
         "slice.calibration_test".to_string(),
         "slice.calibration_test.retraction_steps".to_string(),
-    ]
+    ];
+    if cfg!(feature = "with-libslic3r") {
+        capabilities.extend(OCCT_CAPABILITIES.iter().map(|c| c.to_string()));
+    }
+    capabilities
 }

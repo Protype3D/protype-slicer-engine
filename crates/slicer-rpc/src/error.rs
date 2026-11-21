@@ -32,6 +32,8 @@ pub enum RpcError {
     HistoryUnknownNode { id: u64 },
     #[error("HistoryFilesMissing")]
     HistoryFilesMissing { paths: Vec<String> },
+    #[error("STEP export: {message}")]
+    ExportStep { message: String, data: Value },
     #[error("slicing: {0}")]
     Slicing(String),
 }
@@ -56,6 +58,7 @@ impl RpcError {
             RpcError::ProjectLocked { .. } => -33001,
             RpcError::HistoryUnknownNode { .. } => -33002,
             RpcError::HistoryFilesMissing { .. } => -33003,
+            RpcError::ExportStep { .. } => -33004,
             RpcError::Slicing(_) => -35000,
         }
     }
@@ -91,6 +94,7 @@ impl RpcError {
                 "hostname": hostname,
                 "started_at_unix_ms": started_at_unix_ms,
             })),
+            Self::ExportStep { data, .. } => Some(data.clone()),
             Self::HistoryFilesMissing { paths } => Some(json!({"paths":paths})),
             _ => None,
         }

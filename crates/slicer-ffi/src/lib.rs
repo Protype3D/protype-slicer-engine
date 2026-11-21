@@ -21,6 +21,8 @@ mod default_preset;
 pub mod gcode_header;
 mod idex;
 mod preview;
+mod step_encoding;
+use step_encoding::encode_step_file;
 
 // cxx 1.0.194 derives Clone by cloning every field of non-Copy structs,
 // including scalars. Rust 1.99 lints those generated calls; keep the allowance
@@ -38,6 +40,38 @@ mod ffi_bridge {
         max_x: f32,
         max_y: f32,
         max_z: f32,
+    }
+
+    struct StepExportPart {
+        path: String,
+        name: String,
+        scale: [f64; 3],
+        color: [f64; 3],
+        has_color: bool,
+        // Zero for an imported file whose source shape supplies the reference.
+        source_volume: f64,
+    }
+
+    struct StepExportStats {
+        name: String,
+        volume_mm3: f64,
+        faces: u32,
+        solids: u32,
+    }
+
+    struct StepExportError {
+        kind: String,
+        reason: String,
+        // Empty for document-level errors. Valid part names are nonempty.
+        part: String,
+        has_volume: bool,
+        expected: f64,
+        actual: f64,
+    }
+
+    struct StepExportResult {
+        error: StepExportError,
+        stats: Vec<StepExportStats>,
     }
 
     /// Column-major 4x4 transform matching the UI/Three.js matrix layout.
@@ -404,6 +438,8 @@ mod ffi_bridge {
     }
 
     extern "Rust" {
+        fn encode_step_file(path: &str) -> Result<()>;
+
         /// The snapshot scaled to `width` x `height`, RGBA rows bottom-up, as
         /// Orca's `ThumbnailData` takes them; empty when unusable.
         fn preview_thumbnail_bottom_up(
@@ -577,6 +613,12 @@ mod ffi_bridge {
         fn brep_boolean(op: u8, a: u64, b: u64) -> u64;
         /// Volume in mm³, or 0.0 for a handle nobody holds.
         fn brep_volume(handle: u64) -> f64;
+        fn verify_export_step(
+            parts: &[StepExportPart],
+            volumes: &[f64],
+            path: &str,
+        ) -> StepExportResult;
+        fn export_step(parts: &[StepExportPart], path: &str) -> StepExportResult;
         fn brep_write_step(handle: u64, out_path: &str) -> bool;
         fn brep_release(handle: u64);
 
@@ -934,7 +976,8 @@ pub fn query_model_faces(
 pub use ffi_bridge::{
     brep_boolean, brep_box, brep_chamfer, brep_cylinder, brep_fillet, brep_loft, brep_mirror,
     brep_prism, brep_release, brep_revolve, brep_shell, brep_sphere, brep_transform, brep_volume,
-    brep_write_step,
+    brep_write_step, export_step, verify_export_step, StepExportError, StepExportPart,
+    StepExportResult, StepExportStats,
 };
 
 /// Result of [`apply_operations`]. Re-exports the cxx shared struct directly

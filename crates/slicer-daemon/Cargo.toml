@@ -46,6 +46,7 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 
 [dev-dependencies]
+tempfile = "3"
 futures-util = { workspace = true }
 tokio-tungstenite = { workspace = true }
 # The isolation test writes CSG trees by hand; the daemon itself only
