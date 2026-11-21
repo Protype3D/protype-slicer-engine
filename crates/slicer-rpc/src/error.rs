@@ -28,8 +28,21 @@ pub enum RpcError {
         hostname: Option<String>,
         started_at_unix_ms: i64,
     },
+    #[error("HistoryUnknownNode: {id}")]
+    HistoryUnknownNode { id: u64 },
+    #[error("HistoryFilesMissing")]
+    HistoryFilesMissing { paths: Vec<String> },
     #[error("slicing: {0}")]
     Slicing(String),
+}
+
+impl From<slicer_state::GotoError> for RpcError {
+    fn from(error: slicer_state::GotoError) -> Self {
+        match error {
+            slicer_state::GotoError::UnknownNode(id) => Self::HistoryUnknownNode { id },
+            slicer_state::GotoError::FilesMissing(paths) => Self::HistoryFilesMissing { paths },
+        }
+    }
 }
 
 impl RpcError {
@@ -41,6 +54,8 @@ impl RpcError {
             RpcError::Internal(_) => -32603,
             RpcError::Project(_) => -33000,
             RpcError::ProjectLocked { .. } => -33001,
+            RpcError::HistoryUnknownNode { .. } => -33002,
+            RpcError::HistoryFilesMissing { .. } => -33003,
             RpcError::Slicing(_) => -35000,
         }
     }
@@ -76,6 +91,7 @@ impl RpcError {
                 "hostname": hostname,
                 "started_at_unix_ms": started_at_unix_ms,
             })),
+            Self::HistoryFilesMissing { paths } => Some(json!({"paths":paths})),
             _ => None,
         }
     }

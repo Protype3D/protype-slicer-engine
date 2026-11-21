@@ -2,19 +2,14 @@
 //! is made of ([`UndoEntry`]) and which events walk a step back and forth
 //! ([`inverse_events`], [`forward_events`]).
 //!
-//! The stacks, the lock around them and the way a transaction gathers its
-//! entries stay in the crate root, next to `StateLayer`; they call in here.
+//! A transaction gathers entries against the pre-edit scene. Its tree node
+//! retains the resulting replay events and metadata under the state lock.
 
 use crate::project::{display_name, ObjectRecord, ProjectState};
 use slicer_types::{
     AdaptiveRule, FeatureOp, LayerConfigRange, ObjectGeometry, ObjectId, ObjectOverridePatch,
     PartId, PartSnapshot, ProjectEvent, SettingKey, SettingScope, SettingValue, StepPartPayload,
 };
-
-/// Maximum number of entries kept on the undo / redo stacks. Older entries
-/// are dropped when the cap is exceeded — long sessions don't grow without
-/// bound, but the user still gets a comfortable history.
-const HISTORY_CAP: usize = 200;
 
 /// One undoable mutation. Symmetric: `prev` returns the project to the state
 /// before the change, `next` re-applies it. Each entry maps to exactly one
@@ -165,20 +160,12 @@ impl UndoEntry {
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub(crate) enum HistoryEffect {
-    /// Changes the scene reversibly: snapshot onto the undo stack, drop redo.
+    /// Changes the scene reversibly: append a child at the current head.
     Record(UndoEntry),
-    /// Doesn't change the scene — leave both stacks exactly as they are.
+    /// Leaves the history tree untouched.
     Neutral,
-    /// Makes the recorded history unreachable: clear both stacks.
+    /// Replaces the scene and starts a new history.
     Reset,
-}
-
-pub(crate) fn push_capped(stack: &mut Vec<UndoEntry>, entry: UndoEntry) {
-    stack.push(entry);
-    if stack.len() > HISTORY_CAP {
-        // Drop the oldest entry (front).
-        stack.remove(0);
-    }
 }
 
 /// Sort one event into a history bucket. See [`HistoryEffect`] for why there
@@ -275,11 +262,12 @@ pub(crate) fn classify(project: &ProjectState, event: &ProjectEvent) -> HistoryE
             old_value,
             new_value,
         } => {
-            // Trust the event's old_value (it was computed against current
-            // state at apply time in dispatch); fall back to project lookup.
-            let prev = old_value
-                .clone()
-                .or_else(|| project.settings.get(&(*scope, key.clone())).cloned());
+            // A second client may have edited since the dispatcher read its snapshot.
+            let prev = project
+                .settings
+                .get(&(*scope, key.clone()))
+                .cloned()
+                .or_else(|| old_value.clone());
             HistoryEffect::Record(UndoEntry::Setting {
                 scope: *scope,
                 key: key.clone(),
@@ -293,7 +281,10 @@ pub(crate) fn classify(project: &ProjectState, event: &ProjectEvent) -> HistoryE
             new_transform,
         } => HistoryEffect::Record(UndoEntry::Transform {
             object_id: object_id.clone(),
-            prev: *old_transform,
+            prev: project
+                .objects
+                .get(object_id)
+                .map_or(*old_transform, |obj| obj.transform),
             next: *new_transform,
         }),
         ProjectEvent::ObjectOverrideSet {
@@ -861,3 +852,44 @@ fn restore_events(record: &ObjectRecord) -> Vec<ProjectEvent> {
 
 #[cfg(test)]
 mod tests;
+
+mod describe;
+pub mod tree;
+#[cfg(test)]
+mod tree_tests;
+pub(crate) use describe::describe;
+mod files;
+mod layer;
+mod view;
+pub use layer::{GotoError, GotoOutcome};
+mod blobs;
+pub mod file;
+pub(crate) mod storage;
+pub mod tag;
+
+/// Only scene mutations can be replayed from a saved step. Reset and lifecycle
+/// notifications in a file must never reach the live scene through navigation.
+pub(crate) fn is_replayable(event: &ProjectEvent) -> bool {
+    matches!(
+        event,
+        ProjectEvent::ObjectAdded { .. }
+            | ProjectEvent::ObjectRemoved { .. }
+            | ProjectEvent::ObjectTransformed { .. }
+            | ProjectEvent::ObjectOverrideSet { .. }
+            | ProjectEvent::ObjectOperationsSet { .. }
+            | ProjectEvent::ObjectSeamFacetsSet { .. }
+            | ProjectEvent::ObjectSupportFacetsSet { .. }
+            | ProjectEvent::ObjectFanFacetsSet { .. }
+            | ProjectEvent::ObjectFuzzyFacetsSet { .. }
+            | ProjectEvent::ObjectFilamentFacetsSet { .. }
+            | ProjectEvent::ObjectLayerHeightProfileSet { .. }
+            | ProjectEvent::ObjectLayerRangesSet { .. }
+            | ProjectEvent::AdaptiveRuleSet { .. }
+            | ProjectEvent::AdaptiveRuleRemoved { .. }
+            | ProjectEvent::PartSet { .. }
+            | ProjectEvent::PartRemoved { .. }
+            | ProjectEvent::ObjectGeometryUpdated { .. }
+            | ProjectEvent::ObjectRecipeSet { .. }
+            | ProjectEvent::SettingChanged { .. }
+    )
+}

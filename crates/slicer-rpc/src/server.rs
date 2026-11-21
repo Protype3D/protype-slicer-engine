@@ -2,7 +2,9 @@ use crate::auth::AuthToken;
 use crate::build_info;
 use crate::dispatch::Dispatcher;
 use crate::error::RpcError;
-use crate::methods::{HelloParams, HelloResult, EVENT_NOTIFICATION, GOODBYE, PROTOCOL_VERSION};
+use crate::methods::{
+    HelloParams, HelloResult, EVENT_NOTIFICATION, GOODBYE, HISTORY_NOTIFICATION, PROTOCOL_VERSION,
+};
 use anyhow::Result;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
@@ -11,9 +13,10 @@ use axum::routing::get;
 use axum::Router;
 use serde_json::{json, Value};
 use slicer_state::StateLayer;
+use slicer_types::{EventEnvelope, HistoryChanged};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use tokio::net::TcpListener;
-use tokio::sync::broadcast::error::RecvError;
+use tokio::sync::broadcast::{error::RecvError, Receiver};
 use tracing::{debug, error, info, warn};
 use ulid::Ulid;
 
@@ -120,7 +123,7 @@ async fn handle_socket(mut socket: WebSocket, state: ServerState) {
     // One cut: every event numbered above `current_event_id` reaches this
     // socket, none at or below it does. Taken before the reply, so what the
     // daemon logs while the client reads it waits in `event_rx`.
-    let (mut event_rx, current_event_id) = state.state.subscribe_from_now();
+    let (mut event_rx, mut history_rx, current_event_id) = state.state.subscribe_session();
     let result = HelloResult {
         session_id: session_id.clone(),
         daemon_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -145,7 +148,7 @@ async fn handle_socket(mut socket: WebSocket, state: ServerState) {
     }
     info!(%session_id, "hello complete");
 
-    let dispatcher = Dispatcher::new(state.state.clone());
+    let dispatcher = Dispatcher::with_client(state.state.clone(), &params.client_id);
 
     loop {
         tokio::select! {
@@ -176,23 +179,30 @@ async fn handle_socket(mut socket: WebSocket, state: ServerState) {
                     _ => {}
                 }
             }
-            evt = event_rx.recv() => {
-                match evt {
-                    Ok(envelope) => {
-                        let notif = json!({
-                            "jsonrpc":"2.0",
-                            "method": EVENT_NOTIFICATION,
-                            "params": envelope,
-                        });
-                        if socket.send(Message::Text(notif.to_string())).await.is_err() { break; }
+            notification = next_notification(&mut event_rx, &mut history_rx) => {
+                match notification {
+                    Ok(frame) => {
+                        if socket.send(Message::Text(frame.to_string())).await.is_err() { break; }
                     }
                     Err(RecvError::Lagged(n)) => {
-                        warn!(%session_id, "event subscriber lagged by {n}");
+                        warn!(%session_id, "notification subscriber lagged by {n}");
                     }
                     Err(RecvError::Closed) => break,
                 }
             }
         }
+    }
+}
+
+async fn next_notification(
+    events: &mut Receiver<EventEnvelope>,
+    history: &mut Receiver<HistoryChanged>,
+) -> Result<Value, RecvError> {
+    // When both streams are ready, send queued scene edits before history.
+    tokio::select! {
+        biased;
+        event = events.recv() => Ok(json!({"jsonrpc":"2.0", "method":EVENT_NOTIFICATION, "params":event?})),
+        changed = history.recv() => Ok(json!({"jsonrpc":"2.0", "method":HISTORY_NOTIFICATION, "params":changed?})),
     }
 }
 
@@ -213,6 +223,43 @@ fn error_value(id: &Value, err: &RpcError) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn history_notifications_carry_the_step_then_the_move() {
+        use slicer_types::{ProjectEvent, SettingScope, SettingValue};
+
+        let state = StateLayer::new();
+        let (mut events, mut history, _) = state.subscribe_session();
+        state.apply(ProjectEvent::SettingChanged {
+            scope: SettingScope::Process,
+            key: "layer_height".into(),
+            old_value: None,
+            new_value: SettingValue::Number(0.35),
+        });
+        for (event_id, previous, head, cause) in [(1, 0, 1, "record"), (2, 1, 0, "goto")] {
+            let added = if head == 1 {
+                Some(state.history_node(head).unwrap().0)
+            } else {
+                state.goto(head).unwrap();
+                None
+            };
+            assert_eq!((events.len(), history.len()), (1, 1));
+            let scene = next_notification(&mut events, &mut history).await.unwrap();
+            assert_eq!(scene["method"], "events.event");
+            assert_eq!(scene["params"]["event_id"], event_id);
+
+            let notification = next_notification(&mut events, &mut history).await.unwrap();
+            assert_eq!(
+                notification,
+                json!({
+                    "jsonrpc":"2.0", "method":"history.changed",
+                    "params":{"head":head, "previous_head":previous, "cause":cause, "by":"person",
+                              "can_undo":head == 1, "can_redo":head == 0, "added":added,
+                              "pruned":false, "event_id":event_id}
+                })
+            );
+        }
+    }
 
     // The wire contract the window branches on: a lock of another host
     // answers under its own code with the holder in `data`; every other

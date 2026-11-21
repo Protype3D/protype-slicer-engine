@@ -4,6 +4,10 @@
 //! owns canonical geometry. The file therefore won't open in OrcaSlicer
 //! (bidirectional compat is in backlog), but Protype roundtrips cleanly.
 
+use crate::history::{
+    file::{self, HistoryLoad},
+    tree::HistoryTree,
+};
 use crate::project::{display_name, ObjectRecord, ProjectState};
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -169,6 +173,14 @@ fn schema_version_for(project: &ProjectState) -> u32 {
 /// Write the project state into a .3mf-style ZIP at `path`. Atomic via
 /// write-then-rename so a crash mid-write doesn't corrupt the destination.
 pub fn save(path: &Path, project: &ProjectState) -> Result<()> {
+    save_with_history(path, project, None)
+}
+
+pub(crate) fn save_with_history(
+    path: &Path,
+    project: &ProjectState,
+    history: Option<HistoryTree>,
+) -> Result<()> {
     let tmp = tmp_alongside(path);
     {
         let f = std::fs::File::create(&tmp).with_context(|| format!("create {}", tmp.display()))?;
@@ -188,9 +200,12 @@ pub fn save(path: &Path, project: &ProjectState) -> Result<()> {
 
         // Protype/project.json
         zip.start_file(PROTYPE_PROJECT_FILE, opts)?;
-        zip.write_all(&serde_json::to_vec_pretty(&ProjectFile::from_state(
-            project,
-        ))?)?;
+        let project_json =
+            serde_json::to_vec_pretty(&serde_json::to_value(ProjectFile::from_state(project))?)?;
+        zip.write_all(&project_json)?;
+        if let Some(tree) = history {
+            file::write(&mut zip, tree, &project_json)?;
+        }
 
         if let Some(block) = &project.assistant {
             anyhow::ensure!(block.is_object(), "assistant must be a JSON object");
@@ -231,6 +246,10 @@ fn tmp_alongside(path: &Path) -> std::path::PathBuf {
 /// Read a Protype-format .3mf back into a ProjectState. Schema migrations
 /// run between read and reconstruction so older files keep opening.
 pub fn load(path: &Path) -> Result<ProjectState> {
+    Ok(load_with_history(path)?.0)
+}
+
+pub fn load_with_history(path: &Path) -> Result<(ProjectState, HistoryLoad)> {
     let f = std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
     let mut zip = zip::ZipArchive::new(f)?;
 
@@ -246,13 +265,18 @@ pub fn load(path: &Path) -> Result<ProjectState> {
     }
     // Future: dispatch migrate_v1_to_v2(json) etc here.
 
-    let project_file: ProjectFile = read_json(&mut zip, PROTYPE_PROJECT_FILE)
-        .context("missing or invalid Protype/project.json")?;
+    let mut bytes = Vec::new();
+    zip.by_name(PROTYPE_PROJECT_FILE)?.read_to_end(&mut bytes)?;
+    let project_file: ProjectFile =
+        serde_json::from_slice(&bytes).context("missing or invalid Protype/project.json")?;
     let assistant = read_assistant(&mut zip).unwrap_or_else(|error| {
         tracing::warn!(%error, path = %path.display(), "ignoring invalid Protype/assistant.json");
         None
     });
-    project_file.into_state(assistant)
+    Ok((
+        project_file.into_state(assistant)?,
+        file::read(&mut zip, &bytes),
+    ))
 }
 
 /// Optional window data must never prevent the scene from opening.
@@ -283,7 +307,7 @@ fn read_assistant<R: Read + std::io::Seek>(
 
 impl ProjectFile {
     pub(crate) fn from_state(project: &ProjectState) -> Self {
-        Self {
+        let mut file = Self {
             meta: project.meta.clone(),
             presets: project.presets.clone(),
             objects: project
@@ -326,7 +350,11 @@ impl ProjectFile {
             preset_library: project.preset_library.values().cloned().collect(),
             adaptive_rules: project.adaptive_rules.clone(),
             parts: project.parts.values().cloned().collect(),
-        }
+        };
+        file.settings
+            .sort_by(|a, b| (a.scope as u8, &a.key).cmp(&(b.scope as u8, &b.key)));
+        file.preset_library.sort_by(|a, b| a.id.0.cmp(&b.id.0));
+        file
     }
 
     pub(crate) fn into_state(self, assistant: Option<serde_json::Value>) -> Result<ProjectState> {

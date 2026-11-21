@@ -56,6 +56,9 @@ pub const METHODS: &[&str] = &[
     "geometry.build",
     "geometry.engrave_serial",
     "hello",
+    "history.get",
+    "history.goto",
+    "history.list",
     "machine.check_start_block",
     "machine.list",
     "machine.passport",
@@ -138,15 +141,16 @@ pub const GOODBYE: &str = "goodbye";
 /// The notification that carries each project event to a client. Sent by
 /// `server.rs` under this name; `NOTIFICATIONS` is built from it.
 pub const EVENT_NOTIFICATION: &str = "events.event";
+/// A change to the history tree or its head.
+pub const HISTORY_NOTIFICATION: &str = "history.changed";
 
 /// Methods the socket loop in `server.rs` answers itself, before the
 /// dispatcher: the client says `goodbye` and the daemon closes the session.
 /// An entry here is a promise `tests/method_routing.rs` holds the socket to.
 pub const SERVER_METHODS: &[&str] = &[GOODBYE];
 
-/// Messages the daemon sends to a client on its own, with no request: each
-/// project event, as `events.event`.
-pub const NOTIFICATIONS: &[&str] = &[EVENT_NOTIFICATION];
+/// Messages the daemon sends to a client without a request.
+pub const NOTIFICATIONS: &[&str] = &[EVENT_NOTIFICATION, HISTORY_NOTIFICATION];
 
 /// Capabilities advertised in `hello.capabilities` — the single source of
 /// truth for both entry points that report them: the real client-facing
@@ -158,6 +162,7 @@ pub const NOTIFICATIONS: &[&str] = &[EVENT_NOTIFICATION];
 pub fn capabilities() -> Vec<String> {
     vec![
         "events.subscribe".to_string(),
+        "history".to_string(),
         "project.new".to_string(),
         "project.assistant_get".to_string(),
         "preset.activate".to_string(),

@@ -39,6 +39,7 @@ pub struct LastSliceInfo {
 
 #[derive(Clone)]
 pub struct Dispatcher {
+    client_author: slicer_types::Author,
     pub state: StateLayer,
     /// In-flight slice jobs keyed by job_id, holding their cancel
     /// handles. Inserted by `slice.request` immediately before spawning
@@ -59,7 +60,15 @@ pub struct Dispatcher {
 
 impl Dispatcher {
     pub fn new(state: StateLayer) -> Self {
+        Self::with_client(state, "")
+    }
+    pub fn with_client(state: StateLayer, client_id: &str) -> Self {
         Self {
+            client_author: if client_id.starts_with("mcp-") {
+                slicer_types::Author::Mcp
+            } else {
+                slicer_types::Author::Person
+            },
             state,
             cancel_tokens: Arc::new(StdMutex::new(HashMap::new())),
             last_slice: Arc::new(StdMutex::new(None)),
@@ -2088,7 +2097,18 @@ impl Dispatcher {
         }
     }
 
-    pub async fn handle(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+    pub async fn handle(&self, method: &str, mut params: Value) -> Result<Value, RpcError> {
+        let mut tag: slicer_types::StepTag = params
+            .as_object_mut()
+            .and_then(|map| map.remove("history"))
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|e| RpcError::InvalidParams(format!("history: {e}")))?
+            .unwrap_or_default();
+        tag.author.get_or_insert(self.client_author);
+        slicer_state::history::tag::with_tag(tag, self.handle_tagged(method, params)).await
+    }
+    async fn handle_tagged(&self, method: &str, params: Value) -> Result<Value, RpcError> {
         // The public surface is `METHODS`, not whatever arms the `match`
         // below happens to have: a method that is not listed there is
         // refused here with the very error the `_` arm gives, so an arm
@@ -2114,38 +2134,61 @@ impl Dispatcher {
                 "libslic3r_commit": build_info::LIBSLIC3R_COMMIT,
                 "daemon_dirty": build_info::DIRTY,
             })),
-            "state.snapshot" => Ok(json!({
-                "autosave": self.state.autosave_status(),
-                "current_event_id": self.state.current_event_id(),
-                "can_undo": self.state.can_undo(),
-                "can_redo": self.state.can_redo(),
-            })),
-            "project.undo" => match self.state.undo() {
-                Some(envelope) => Ok(json!({
-                    "applied": true,
-                    "event_id": envelope.event_id,
-                    "can_undo": self.state.can_undo(),
-                    "can_redo": self.state.can_redo(),
-                })),
-                None => Ok(json!({
-                    "applied": false,
-                    "can_undo": false,
-                    "can_redo": self.state.can_redo(),
-                })),
-            },
-            "project.redo" => match self.state.redo() {
-                Some(envelope) => Ok(json!({
-                    "applied": true,
-                    "event_id": envelope.event_id,
-                    "can_undo": self.state.can_undo(),
-                    "can_redo": self.state.can_redo(),
-                })),
-                None => Ok(json!({
-                    "applied": false,
-                    "can_undo": self.state.can_undo(),
-                    "can_redo": false,
-                })),
-            },
+            "state.snapshot" => {
+                let (event_id, head, can_undo, can_redo) = self.state.history_status();
+                Ok(
+                    json!({"autosave":self.state.autosave_status(),"current_event_id":event_id,"history_head":head,"can_undo":can_undo,"can_redo":can_redo}),
+                )
+            }
+            "project.undo" | "project.redo" => {
+                let (last, can_undo, can_redo) = self.state.undo_redo(method == "project.redo");
+                let mut response =
+                    json!({"applied":last.is_some(),"can_undo":can_undo,"can_redo":can_redo});
+                if let Some(last) = last {
+                    response["event_id"] = json!(last.event_id);
+                }
+                Ok(response)
+            }
+            "history.list" => {
+                #[derive(Deserialize)]
+                struct List {
+                    object_id: Option<String>,
+                    limit: Option<usize>,
+                    before: Option<u64>,
+                }
+                let p: List =
+                    serde_json::from_value(if params.is_null() { json!({}) } else { params })
+                        .map_err(|e| RpcError::InvalidParams(e.to_string()))?;
+                Ok(json!(self.state.history_view(
+                    p.object_id.as_deref(),
+                    p.limit.unwrap_or(500),
+                    p.before
+                )))
+            }
+            "history.goto" | "history.get" => {
+                #[derive(Deserialize)]
+                struct Target {
+                    id: u64,
+                }
+                let p: Target = serde_json::from_value(params)
+                    .map_err(|e| RpcError::InvalidParams(e.to_string()))?;
+                if method == "history.get" {
+                    let (node, recipes) = self
+                        .state
+                        .history_node(p.id)
+                        .ok_or(RpcError::HistoryUnknownNode { id: p.id })?;
+                    let recipes: Vec<_> = recipes
+                        .into_iter()
+                        .map(|(object_id, recipe)| json!({"object_id":object_id,"recipe":recipe}))
+                        .collect();
+                    Ok(json!({"node":node,"recipes":recipes}))
+                } else {
+                    let outcome = self.state.goto(p.id)?;
+                    Ok(
+                        json!({"applied":outcome.applied,"head":outcome.head,"previous_head":outcome.previous_head,"event_id":outcome.last.map(|e|e.event_id)}),
+                    )
+                }
+            }
             "state.events_since" => {
                 let p: EventsSinceParams = serde_json::from_value(params).unwrap_or_default();
                 let events = self.state.events_since(slicer_types::EventId(p.since));
@@ -2313,8 +2356,11 @@ impl Dispatcher {
                 let tree = params.get("tree").unwrap_or(&Value::Null);
                 let meshes = self.measured_meshes(method, tree).await?;
                 let state = self.state.clone();
+                let tag = slicer_state::history::tag::current_tag();
                 tokio::task::spawn_blocking(move || {
-                    crate::geometry::handle_build(&state, &meshes, params)
+                    slicer_state::history::tag::with_tag_sync(tag, || {
+                        crate::geometry::handle_build(&state, &meshes, params)
+                    })
                 })
                 .await
                 .map_err(|e| RpcError::Project(format!("geometry task failed: {e}")))?
@@ -2325,8 +2371,11 @@ impl Dispatcher {
             // STEP_FFI_LOCK inside.
             "project.apply_external_edit" => {
                 let state = self.state.clone();
+                let tag = slicer_state::history::tag::current_tag();
                 tokio::task::spawn_blocking(move || {
-                    crate::external_edit::handle_apply_external_edit(&state, params)
+                    slicer_state::history::tag::with_tag_sync(tag, || {
+                        crate::external_edit::handle_apply_external_edit(&state, params)
+                    })
                 })
                 .await
                 .map_err(|e| RpcError::Project(format!("external edit task failed: {e}")))?
@@ -2337,19 +2386,22 @@ impl Dispatcher {
             "part.create" | "part.create_from_object" | "part.set_document" | "part.remove" => {
                 let state = self.state.clone();
                 let method = method.to_string();
-                tokio::task::spawn_blocking(move || match method.as_str() {
-                    "part.create" => crate::part::handle_create(&state, params),
-                    "part.create_from_object" => {
-                        crate::part::handle_create_from_object(&state, params)
-                    }
-                    "part.set_document" => crate::part::handle_set_document(&state, params),
-                    "part.remove" => crate::part::handle_remove(&state, params),
-                    // The outer pattern names exactly the four methods above. One
-                    // added there and not here must fail loudly, not run as the
-                    // removal of a part.
-                    other => Err(RpcError::Internal(format!(
-                        "part method {other} is routed to the blocking pool but has no handler"
-                    ))),
+                let tag = slicer_state::history::tag::current_tag();
+                tokio::task::spawn_blocking(move || {
+                    slicer_state::history::tag::with_tag_sync(tag, || match method.as_str() {
+                        "part.create" => crate::part::handle_create(&state, params),
+                        "part.create_from_object" => {
+                            crate::part::handle_create_from_object(&state, params)
+                        }
+                        "part.set_document" => crate::part::handle_set_document(&state, params),
+                        "part.remove" => crate::part::handle_remove(&state, params),
+                        // The outer pattern names exactly the four methods above. One
+                        // added there and not here must fail loudly, not run as the
+                        // removal of a part.
+                        other => Err(RpcError::Internal(format!(
+                            "part method {other} is routed to the blocking pool but has no handler"
+                        ))),
+                    })
                 })
                 .await
                 .map_err(|e| RpcError::Project(format!("part task failed: {e}")))?
@@ -3337,14 +3389,15 @@ impl Dispatcher {
                         take_over_lock(&path)?;
                     }
                 }
-                let loaded = slicer_state::persist::load(&path)
+                let (loaded, history) = slicer_state::persist::load_with_history(&path)
                     .map_err(|e| RpcError::Project(format!("open failed: {e:#}")))?;
                 // Release the previous file's lock before swapping state.
                 if let Some(prev) = self.state.current_path() {
                     let _ = slicer_state::lockfile::release(&prev);
                 }
-                let result = json!({ "path": p.path, "assistant": loaded.assistant });
-                self.state.replace_state(loaded, Some(path));
+                let result = json!({ "path": p.path, "assistant": loaded.assistant,"history":history.status() });
+                self.state
+                    .replace_state_with_history(loaded, Some(path), history.into_tree());
                 Ok(result)
             }
             "project.assistant_get" => Ok(json!({ "assistant": self.state.assistant() })),
@@ -3364,10 +3417,15 @@ impl Dispatcher {
                     .map_err(|e| RpcError::Project(format!("invalid params: {e}")))?;
                 let root = self.autosave_root()?;
                 let current = self.state.autosave().map(|s| s.project_id().to_string());
-                let recovered =
-                    slicer_state::autosave::recover(&root, &p.project_id, current.as_deref())
-                        .map_err(|e| RpcError::Project(format!("recover failed: {e}")))?;
-                let (_, durable) = self.state.replace_state_checkpointed(recovered, None);
+                let (recovered, tree) = slicer_state::autosave::recover_with_history(
+                    &root,
+                    &p.project_id,
+                    current.as_deref(),
+                )
+                .map_err(|e| RpcError::Project(format!("recover failed: {e}")))?;
+                let (_, durable) =
+                    self.state
+                        .replace_state_with_history(recovered, None, Some(tree));
                 // Keep the previous copy until a synced replacement exists.
                 if durable {
                     let _ =

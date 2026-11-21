@@ -423,3 +423,5 @@ fn a_new_change_drops_the_redo_stack() {
         "a fresh change makes the undone branch unreachable"
     );
 }
+
+mod navigation;

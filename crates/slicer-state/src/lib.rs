@@ -1,16 +1,14 @@
 use crate::autosave::AutosaveSink;
-use crate::history::{
-    classify, forward_events, inverse_events, push_capped, HistoryEffect, UndoEntry,
-};
+use crate::history::{classify, tree::HistoryTree, HistoryEffect, UndoEntry};
 use crate::project::ProjectState;
 use parking_lot::Mutex;
-use slicer_types::{EventEnvelope, EventId, ProjectEvent};
+use slicer_types::{EventEnvelope, EventId, HistoryCause, HistoryChanged, ProjectEvent};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
 pub mod autosave;
-mod history;
+pub mod history;
 pub mod host_identity;
 pub mod lockfile;
 pub mod paint;
@@ -20,6 +18,7 @@ pub mod process_owner;
 pub mod project;
 pub mod reducer;
 
+pub use history::{GotoError, GotoOutcome};
 pub use paths::{app_data_dir, object_cache_dir};
 pub use project::ObjectRecord;
 
@@ -53,6 +52,7 @@ pub struct StateLayer {
     /// Order saves from multiple clients while scene edits remain available during ZIP I/O.
     save_lock: Arc<Mutex<()>>,
     event_tx: broadcast::Sender<EventEnvelope>,
+    history_tx: broadcast::Sender<HistoryChanged>,
     autosave: Option<Arc<AutosaveSink>>,
     autosave_unavailable_reason: Option<String>,
 }
@@ -64,8 +64,7 @@ struct Inner {
     last_edit: EventId,
     log: VecDeque<EventEnvelope>,
     project: ProjectState,
-    undo: Vec<UndoEntry>,
-    redo: Vec<UndoEntry>,
+    history: HistoryTree,
     /// Path of the currently-open project file (the one we hold the lock
     /// for). `None` until project.save / project.open is called.
     current_path: Option<std::path::PathBuf>,
@@ -87,11 +86,11 @@ impl StateLayer {
                 last_edit: EventId(0),
                 log: VecDeque::new(),
                 project: ProjectState::default(),
-                undo: Vec::new(),
-                redo: Vec::new(),
+                history: HistoryTree::new(chrono::Utc::now().timestamp_millis()),
                 current_path: None,
             })),
             event_tx,
+            history_tx: broadcast::channel(1024).0,
             autosave: None,
             autosave_unavailable_reason: None,
         }
@@ -111,6 +110,13 @@ impl StateLayer {
     /// applied; otherwise the recovered project would be missing the
     /// pre-attachment events.
     pub fn with_autosave(mut self, sink: AutosaveSink) -> Self {
+        // Before the first step the manifest supplies the recovery root timestamp.
+        {
+            let mut inner = self.inner.lock();
+            if inner.next_event_id == 1 {
+                inner.history = HistoryTree::new(sink.started_at_unix_ms);
+            }
+        }
         self.autosave = Some(Arc::new(sink));
         self
     }
@@ -139,30 +145,8 @@ impl StateLayer {
         self.autosave.clone()
     }
 
-    /// Apply a user-originated event. `classify` decides what it does to the
-    /// history: an undoable scene change snapshots the prior state onto the
-    /// undo stack and clears redo — adding and removing an object are such
-    /// steps; an event that doesn't touch the scene (slicing, preset
-    /// lifecycle) leaves the history alone; an event that replaces the scene
-    /// wholesale (project open/create/replace) clears both stacks, since
-    /// neither direction would still be reachable.
     pub fn apply(&self, event: ProjectEvent) -> EventEnvelope {
-        let mut inner = self.inner.lock();
-        // NOTE: classified against the project state as it is *before*
-        // `apply_internal` runs the reducer — that's what lets the `Record`
-        // arms read the "old" side of each change straight off the project.
-        match classify(&inner.project, &event) {
-            HistoryEffect::Record(entry) => {
-                push_capped(&mut inner.undo, entry);
-                inner.redo.clear();
-            }
-            HistoryEffect::Neutral => {}
-            HistoryEffect::Reset => {
-                inner.undo.clear();
-                inner.redo.clear();
-            }
-        }
-        self.apply_internal(&mut inner, event)
+        self.transaction(|txn| txn.apply(event))
     }
 
     /// Run `f` as one user action: every event it applies is broadcast as
@@ -179,36 +163,18 @@ impl StateLayer {
             // The field is `&mut Inner`; the guard deref-coerces to it.
             inner: &mut guard,
             entries: Vec::new(),
+            events: Vec::new(),
             reset: false,
         };
         let out = f(&mut txn);
-        let Txn { entries, reset, .. } = txn;
-        if reset {
-            guard.undo.clear();
-            guard.redo.clear();
-        } else if let Some(step) = UndoEntry::step(entries) {
-            push_capped(&mut guard.undo, step);
-            guard.redo.clear();
-        }
+        let Txn {
+            entries,
+            events,
+            reset,
+            ..
+        } = txn;
+        self.finish_step(&mut guard, entries, reset, events);
         out
-    }
-
-    /// Apply an event without touching the undo/redo stacks. Used when
-    /// processing an undo or redo so we don't push the inverse onto its own
-    /// stack again.
-    fn apply_silent(&self, inner: &mut Inner, event: ProjectEvent) -> EventEnvelope {
-        self.apply_internal(inner, event)
-    }
-
-    /// Apply the events of one undo or redo step, in order and without
-    /// touching the stacks. Returns the envelope of the last one, or `None`
-    /// for an empty list.
-    fn apply_all(&self, inner: &mut Inner, events: Vec<ProjectEvent>) -> Option<EventEnvelope> {
-        let mut last = None;
-        for event in events {
-            last = Some(self.apply_silent(inner, event));
-        }
-        last
     }
 
     fn apply_internal(&self, inner: &mut Inner, event: ProjectEvent) -> EventEnvelope {
@@ -227,38 +193,32 @@ impl StateLayer {
             timestamp_ms: chrono::Utc::now().timestamp_millis(),
         };
         push_log(&mut inner.log, envelope.clone());
-        if let Some(sink) = &self.autosave {
-            sink.record(&envelope, &inner.project);
-        }
-        let _ = self.event_tx.send(envelope.clone());
         envelope
     }
 
-    /// Roll back the last history step. Returns the envelope of the last
-    /// event that step applied, or `None` if there's nothing to undo.
-    pub fn undo(&self) -> Option<EventEnvelope> {
-        let mut inner = self.inner.lock();
-        let entry = inner.undo.pop()?;
-        let events = inverse_events(&entry);
-        push_capped(&mut inner.redo, entry);
-        self.apply_all(&mut inner, events)
-    }
-
-    /// Re-apply a previously undone history step.
-    pub fn redo(&self) -> Option<EventEnvelope> {
-        let mut inner = self.inner.lock();
-        let entry = inner.redo.pop()?;
-        let events = forward_events(&entry);
-        push_capped(&mut inner.undo, entry);
-        self.apply_all(&mut inner, events)
+    fn publish(
+        &self,
+        inner: &Inner,
+        events: &[EventEnvelope],
+        previous_head: u64,
+        cause: Option<HistoryCause>,
+    ) {
+        if let Some(sink) = &self.autosave {
+            sink.record(events, &inner.project, &inner.history, cause);
+        }
+        for envelope in events {
+            let _ = self.event_tx.send(envelope.clone());
+        }
+        if let Some(cause) = cause {
+            self.notify_history(inner, previous_head, cause);
+        }
     }
 
     pub fn can_undo(&self) -> bool {
-        !self.inner.lock().undo.is_empty()
+        self.inner.lock().history.undo_target().is_some()
     }
-
     pub fn can_redo(&self) -> bool {
-        !self.inner.lock().redo.is_empty()
+        self.inner.lock().history.redo_target().is_some()
     }
 
     pub fn snapshot(&self) -> ProjectState {
@@ -281,15 +241,20 @@ impl StateLayer {
         assistant: Option<Option<serde_json::Map<String, serde_json::Value>>>,
     ) -> anyhow::Result<()> {
         let _save = self.save_lock.lock();
-        let (mut project, project_start, last_edit) = {
+        let (mut project, history, project_start, last_edit) = {
             let inner = self.inner.lock();
-            (inner.project.clone(), inner.project_start, inner.last_edit)
+            (
+                inner.project.clone(),
+                inner.history.clone(),
+                inner.project_start,
+                inner.last_edit,
+            )
         };
         let update_assistant = assistant.is_some();
         if let Some(block) = assistant {
             project.assistant = block.map(serde_json::Value::Object);
         }
-        persist::save(path, &project)?;
+        persist::save_with_history(path, &project, Some(history))?;
         let mut inner = self.inner.lock();
         if inner.project_start == project_start {
             if update_assistant {
@@ -324,17 +289,20 @@ impl StateLayer {
         let Some(sink) = &self.autosave else {
             return false;
         };
-        if let Err(e) = sink.checkpoint(&inner.project, last_event_id(inner), on_disk) {
+        if let Err(e) = sink.checkpoint(
+            &inner.project,
+            &inner.history,
+            last_event_id(inner),
+            on_disk,
+        ) {
             tracing::warn!(?e, "autosave checkpoint failed");
             return false;
         }
         true
     }
 
-    /// Replace the entire project state atomically. Drops the event log
-    /// and undo/redo history (the loaded project is the new "origin") and
-    /// broadcasts a single `ProjectReplaced` event so subscribers re-fetch
-    /// derived data. The numbering goes on: `ProjectReplaced` takes the next
+    /// Replace the entire project atomically with a fresh history root.
+    /// The numbering goes on: `ProjectReplaced` takes the next
     /// id, so every event of the replaced project — including one still on
     /// its way to a socket — is numbered below it, and a client that keeps
     /// only events past its last id never takes a stale one for new.
@@ -364,14 +332,24 @@ impl StateLayer {
         project: ProjectState,
         path: Option<std::path::PathBuf>,
     ) -> (EventEnvelope, bool) {
+        self.replace_state_with_history(project, path, None)
+    }
+
+    pub fn replace_state_with_history(
+        &self,
+        project: ProjectState,
+        path: Option<std::path::PathBuf>,
+        tree: Option<HistoryTree>,
+    ) -> (EventEnvelope, bool) {
         let project = project.with_canonical_override_keys();
         let mut inner = self.inner.lock();
         inner.project = project;
         inner.project_start = EventId(inner.next_event_id);
         inner.last_edit = inner.project_start;
         inner.log.clear();
-        inner.undo.clear();
-        inner.redo.clear();
+        let previous_head = inner.history.head();
+        inner.history =
+            tree.unwrap_or_else(|| HistoryTree::new(chrono::Utc::now().timestamp_millis()));
         let event_path = path.as_ref().map(|p| p.to_string_lossy().into_owned());
         let opened_from_file = path.is_some();
         inner.current_path = path;
@@ -387,11 +365,32 @@ impl StateLayer {
         push_log(&mut inner.log, envelope.clone());
         let durable = self.anchor_autosave(&inner, opened_from_file);
         let _ = self.event_tx.send(envelope.clone());
+        self.notify_history(&inner, previous_head, HistoryCause::Load);
         (envelope, durable)
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<EventEnvelope> {
         self.event_tx.subscribe()
+    }
+
+    pub fn subscribe_history(&self) -> broadcast::Receiver<HistoryChanged> {
+        self.history_tx.subscribe()
+    }
+
+    /// Subscribe a socket to both streams at the same scene revision.
+    pub fn subscribe_session(
+        &self,
+    ) -> (
+        broadcast::Receiver<EventEnvelope>,
+        broadcast::Receiver<HistoryChanged>,
+        EventId,
+    ) {
+        let inner = self.inner.lock();
+        (
+            self.subscribe(),
+            self.subscribe_history(),
+            last_event_id(&inner),
+        )
     }
 
     /// Subscribe to the broadcast and read the last event id as one cut:
@@ -441,6 +440,7 @@ pub struct Txn<'a> {
     layer: &'a StateLayer,
     inner: &'a mut Inner,
     entries: Vec<UndoEntry>,
+    events: Vec<EventEnvelope>,
     reset: bool,
 }
 
@@ -459,6 +459,8 @@ impl Txn<'_> {
             HistoryEffect::Neutral => {}
             HistoryEffect::Reset => self.reset = true,
         }
-        self.layer.apply_internal(&mut *self.inner, event)
+        let envelope = self.layer.apply_internal(self.inner, event);
+        self.events.push(envelope.clone());
+        envelope
     }
 }

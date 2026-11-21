@@ -43,6 +43,9 @@ methods = [
     "geometry.build",
     "geometry.engrave_serial",
     "hello",
+    "history.get",
+    "history.goto",
+    "history.list",
     "machine.check_start_block",
     "machine.list",
     "machine.passport",
@@ -120,7 +123,7 @@ methods = [
 # Методы, на которые отвечает сам сокет до диспетчера (`server.rs`).
 server_methods = ["goodbye"]
 # Сообщения демона клиенту без запроса.
-notifications = ["events.event"]
+notifications = ["events.event", "history.changed"]
 # Равно `slicer_rpc::methods::capabilities()`; в `hello` идут в порядке показа,
 # здесь по алфавиту.
 capabilities = [
@@ -132,6 +135,7 @@ capabilities = [
     "geometry.engrave_serial",
     "geometry.extrude_twist",
     "geometry.surface_relief_v1",
+    "history",
     "machine.passport",
     "mesh.measure",
     "mesh_inspector",

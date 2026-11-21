@@ -16,3 +16,5 @@ pub use presets::*;
 pub use project::*;
 pub use resolved_config::*;
 pub use settings::*;
+pub mod history;
+pub use history::*;

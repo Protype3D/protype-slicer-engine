@@ -16,11 +16,16 @@
 use crate::paths::app_data_dir;
 use crate::persist::ProjectFile;
 use crate::project::ProjectState;
-use crate::reducer;
+mod journal;
+use crate::history::{
+    file::SavedHistory,
+    storage::Input,
+    tree::{HistoryTree, MAX_HISTORY_BYTES, MAX_NODES},
+};
 use anyhow::{bail, Context, Result};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use slicer_types::{EventEnvelope, EventId, ProjectEvent};
+use slicer_types::{EventEnvelope, EventId, HistoryCause, ProjectEvent};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -38,7 +43,7 @@ const LOG_FILE: &str = "events.log";
 
 /// The project a session put in place, which recovery starts from.
 #[derive(Serialize, Deserialize)]
-struct Base {
+struct Base<H> {
     /// The last event the base holds. Event ids keep growing for the life of
     /// the daemon, across project swaps, so a log line numbered at or below
     /// it is one the base already holds: a crash between writing the base and
@@ -48,6 +53,7 @@ struct Base {
     /// it has nothing a file does not.
     on_disk: bool,
     project: ProjectFile,
+    history: Option<H>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     assistant: Option<serde_json::Value>,
 }
@@ -110,7 +116,7 @@ pub struct AutosaveSink {
     /// shows, so the next recorded event writes a full snapshot instead of a
     /// delta onto what the discard left.
     rebase_pending: AtomicBool,
-    started_at_unix_ms: i64,
+    pub(crate) started_at_unix_ms: i64,
 }
 
 impl AutosaveSink {
@@ -156,7 +162,7 @@ impl AutosaveSink {
             schema_version: 1,
             process_start: crate::process_owner::this_process_start(),
         };
-        write_atomic(&self.dir, "meta.json", &serde_json::to_vec(&meta)?)?;
+        write_atomic(&self.dir, "meta.json", &meta)?;
         OpenOptions::new()
             .create(true)
             .append(true)
@@ -220,20 +226,32 @@ impl AutosaveSink {
 
     /// Called under StateLayer's lock after reduction. Once any write failed,
     /// only a full snapshot can make the session healthy again.
-    pub(crate) fn record(&self, envelope: &EventEnvelope, project: &ProjectState) {
-        if !is_journaled(&envelope.event) {
+    pub(crate) fn record(
+        &self,
+        events: &[EventEnvelope],
+        project: &ProjectState,
+        tree: &HistoryTree,
+        cause: Option<HistoryCause>,
+    ) {
+        let Some(last) = events.last() else { return };
+        if !events.iter().any(|e| is_journaled(&e.event)) {
             return;
         }
-        if self.error.lock().is_some() || self.rebase_pending.swap(false, Ordering::SeqCst) {
-            let _ = self.checkpoint(project, envelope.event_id, false);
+        // A new branch at the old root can prune its own first node into
+        // the new root. Its deltas no longer exist, so anchor the entire step.
+        let promoted = tree.head() == tree.root() && cause == Some(HistoryCause::Record);
+        if self.rebase_pending.swap(false, Ordering::SeqCst)
+            || self.error.lock().is_some()
+            || promoted
+        {
+            let _ = self.checkpoint(project, tree, last.event_id, false);
             return;
         }
         let result = (|| {
-            let mut bytes = serde_json::to_vec(envelope)?;
-            bytes.push(b'\n');
-            let mut log = self.open_log()?;
-            log.write_all(&bytes)?;
-            log.sync_data()?;
+            let mut log = std::io::BufWriter::new(self.open_log()?);
+            journal::write(&mut log, events, tree, cause)?;
+            log.flush()?;
+            log.get_ref().sync_data()?;
             Ok(())
         })();
         self.set_result(&result);
@@ -244,6 +262,7 @@ impl AutosaveSink {
     pub(crate) fn checkpoint(
         &self,
         project: &ProjectState,
+        tree: &HistoryTree,
         through: EventId,
         on_disk: bool,
     ) -> Result<()> {
@@ -253,9 +272,10 @@ impl AutosaveSink {
                 through,
                 on_disk,
                 project: ProjectFile::from_state(project),
+                history: Some(tree),
                 assistant: project.assistant.clone(),
             };
-            write_base(&self.dir, &base)?;
+            write_atomic(&self.dir, BASE_FILE, &base)?;
             self.truncate_log()
         })();
         self.set_result(&result);
@@ -387,9 +407,30 @@ pub fn list_orphans(root: &Path, current: Option<&str>) -> Result<Vec<OrphanSess
 /// rebuilt state; the caller must durably checkpoint it before discarding
 /// this source. The current live session is refused.
 pub fn recover(root: &Path, project_id: &str, current: Option<&str>) -> Result<ProjectState> {
+    Ok(recover_with_history(root, project_id, current)?.0)
+}
+
+pub fn recover_with_history(
+    root: &Path,
+    project_id: &str,
+    current: Option<&str>,
+) -> Result<(ProjectState, HistoryTree)> {
     let dir = orphan_dir(root, project_id, current)?;
+    recover_dir(&dir, MAX_NODES, MAX_HISTORY_BYTES)
+}
+
+fn recover_dir(
+    dir: &Path,
+    max_nodes: usize,
+    max_bytes: usize,
+) -> Result<(ProjectState, HistoryTree)> {
     let log_path = dir.join(LOG_FILE);
-    let base = read_base(&dir)?;
+    let input = read_base(dir)?;
+    let base: Option<Base<SavedHistory>> = input
+        .as_ref()
+        .map(|input| serde_json::from_slice(input.bytes()))
+        .transpose()
+        .with_context(|| format!("parse {}", dir.join(BASE_FILE).display()))?;
     let log = match File::open(&log_path) {
         Ok(f) => Some(f),
         // The base alone is a whole project; only a session with neither has
@@ -397,41 +438,41 @@ pub fn recover(root: &Path, project_id: &str, current: Option<&str>) -> Result<P
         Err(e) if e.kind() == std::io::ErrorKind::NotFound && base.is_some() => None,
         Err(e) => return Err(e).with_context(|| format!("open {}", log_path.display())),
     };
-    let (mut state, through) = match base {
+    let (mut state, through, history) = match base {
         Some(base) => (
             base.project
                 .into_state(base.assistant.filter(serde_json::Value::is_object))?,
             base.through,
+            base.history,
         ),
-        None => (ProjectState::default(), EventId(0)),
+        None => (ProjectState::default(), EventId(0), None),
     };
-    let Some(log) = log else {
-        return Ok(state);
+    let mut history = history;
+    let mut tree = if let Some(base) = &history {
+        base.skeleton(max_nodes, max_bytes)?
+    } else {
+        let started = std::fs::read(dir.join("meta.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<AutosaveMeta>(&bytes).ok())
+            .map_or(0, |meta| meta.started_at_unix_ms);
+        HistoryTree::new_with_limits(started, max_nodes, max_bytes)
     };
-    let mut reader = BufReader::new(log);
-    let mut line = Vec::new();
-    loop {
-        line.clear();
-        if reader.read_until(b'\n', &mut line)? == 0 {
-            break;
-        }
-        // A killed writer may leave an incomplete final record. Only the
-        // trailing non-terminated line is ignored; complete corrupt records
-        // still fail instead of silently losing changes in the middle.
-        if line.last() != Some(&b'\n') {
-            break;
-        }
-        if line.iter().all(u8::is_ascii_whitespace) {
-            continue;
-        }
-        let envelope: EventEnvelope = serde_json::from_slice(&line)
-            .with_context(|| format!("parse autosave line in {}", log_path.display()))?;
-        if envelope.event_id <= through {
-            continue;
-        }
-        reducer::reduce(&mut state, &envelope.event);
+    if let Some(log) = log {
+        journal::replay(
+            Input::read(log)?.bytes(),
+            through,
+            &mut state,
+            &mut tree,
+            &mut history,
+        )
+        .with_context(|| format!("replay {}", log_path.display()))?;
+    } else {
+        tree.pruned = tree.enforce_limits(false);
     }
-    Ok(state)
+    if let Some(base) = history {
+        base.hydrate(&mut tree)?;
+    }
+    Ok((state, tree))
 }
 
 /// Delete an orphan directory. Used after a recovery is accepted (so we
@@ -446,16 +487,16 @@ pub fn discard(root: &Path, project_id: &str, current: Option<&str>) -> Result<(
 
 /// Sync the temporary file, replace the destination, then sync its directory.
 /// No previous base or journal is removed before this completes.
-fn write_base(dir: &Path, base: &Base) -> Result<()> {
-    write_atomic(dir, BASE_FILE, &serde_json::to_vec(base)?)
-}
-
-fn write_atomic(dir: &Path, name: &str, bytes: &[u8]) -> Result<()> {
+fn write_atomic(dir: &Path, name: &str, value: &impl Serialize) -> Result<()> {
     let path = dir.join(name);
     let tmp = dir.join(format!("{name}.tmp"));
     let mut file = File::create(&tmp).with_context(|| format!("create {}", tmp.display()))?;
-    file.write_all(bytes)
-        .with_context(|| format!("write {}", tmp.display()))?;
+    {
+        let mut writer = std::io::BufWriter::new(&mut file);
+        serde_json::to_writer(&mut writer, value)
+            .with_context(|| format!("write {}", tmp.display()))?;
+        writer.flush()?;
+    }
     file.sync_all()
         .with_context(|| format!("sync {}", tmp.display()))?;
     drop(file);
@@ -477,10 +518,10 @@ pub(crate) fn sync_directory(dir: &Path) -> Result<()> {
 }
 
 /// The session's base, `None` while it has none.
-fn read_base(dir: &Path) -> Result<Option<Base>> {
+fn read_base(dir: &Path) -> Result<Option<Input>> {
     let path = dir.join(BASE_FILE);
-    match std::fs::read(&path) {
-        Ok(bytes) => serde_json::from_slice(&bytes)
+    match File::open(&path) {
+        Ok(file) => Input::read(file)
             .map(Some)
             .with_context(|| format!("parse {}", path.display())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -496,8 +537,9 @@ fn base_is_off_disk(dir: &Path) -> bool {
     struct OnDisk {
         on_disk: bool,
     }
-    match std::fs::read(dir.join(BASE_FILE)) {
-        Ok(bytes) => serde_json::from_slice::<OnDisk>(&bytes).map_or(true, |base| !base.on_disk),
+    match File::open(dir.join(BASE_FILE)) {
+        Ok(file) => serde_json::from_reader::<_, OnDisk>(BufReader::new(file))
+            .map_or(true, |base| !base.on_disk),
         Err(e) => e.kind() != std::io::ErrorKind::NotFound,
     }
 }
@@ -523,7 +565,17 @@ fn orphan_dir(root: &Path, project_id: &str, current: Option<&str>) -> Result<Pa
 
 fn count_lines(path: &Path) -> Result<usize> {
     let f = File::open(path)?;
-    Ok(BufReader::new(f).lines().count())
+    #[derive(Deserialize)]
+    struct Kind {
+        history: Option<serde::de::IgnoredAny>,
+    }
+    let mut count = 0;
+    for line in BufReader::new(f).lines() {
+        if serde_json::from_str::<Kind>(&line?).map_or(true, |entry| entry.history.is_none()) {
+            count += 1;
+        }
+    }
+    Ok(count)
 }
 
 /// Whether the daemon `pid`, started at `started`, may still own its
@@ -600,5 +652,88 @@ mod tests {
             err.to_string().contains("own live autosave session"),
             "{err}"
         );
+    }
+}
+
+#[cfg(test)]
+mod history_limits_tests {
+    use super::*;
+    use slicer_types::{NodeMeta, ObjectId};
+
+    fn paint(tree: &mut HistoryTree, size: usize) {
+        tree.record(
+            vec![ProjectEvent::ObjectSupportFacetsSet {
+                object_id: ObjectId("a".into()),
+                facets_rle: Some("x".repeat(size)),
+            }],
+            vec![],
+            NodeMeta {
+                at_ms: tree.next_id as i64,
+                ..Default::default()
+            },
+        );
+    }
+
+    #[test]
+    fn checkpoint_and_journal_are_pruned_at_the_recovered_head() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink = AutosaveSink::new_in(dir.path()).unwrap();
+        let mut tree = HistoryTree::new(0);
+        for _ in 0..6 {
+            paint(&mut tree, 1 << 16);
+        }
+        sink.checkpoint(&ProjectState::default(), &tree, EventId(6), false)
+            .unwrap();
+        // Replay goes back to a node that early pruning of base.json would lose.
+        tree.set_head(1);
+        let event = |id| EventEnvelope {
+            event_id: EventId(id),
+            event: ProjectEvent::ObjectSupportFacetsSet {
+                object_id: ObjectId("a".into()),
+                facets_rle: None,
+            },
+            timestamp_ms: 0,
+        };
+        let mut log = sink.open_log().unwrap();
+        journal::write(&mut log, &[event(7)], &tree, Some(HistoryCause::Goto)).unwrap();
+        paint(&mut tree, 1 << 16);
+        journal::write(&mut log, &[event(8)], &tree, Some(HistoryCause::Record)).unwrap();
+        paint(&mut tree, 1 << 16);
+        journal::write(&mut log, &[event(9)], &tree, Some(HistoryCause::Record)).unwrap();
+        let limit = 2 << 16;
+        let (_, tree) = recover_dir(sink.dir(), 2000, limit).unwrap();
+        assert_eq!((tree.root, tree.head), (7, 8));
+        assert_eq!(tree.nodes[&8].forward.len(), 1);
+        assert!(tree.pruned && tree.bytes <= limit);
+    }
+
+    #[test]
+    fn legacy_inline_checkpoint_opens_under_the_byte_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink = AutosaveSink::new_in(dir.path()).unwrap();
+        let mut tree = HistoryTree::new(0);
+        for _ in 0..5 {
+            paint(&mut tree, 16384);
+        }
+        let mut nodes = serde_json::Map::new();
+        for (&id, node) in &tree.nodes {
+            let mut row = serde_json::to_value(node.as_ref()).unwrap();
+            row["redo_child"] = serde_json::to_value(tree.redo.get(&id)).unwrap();
+            nodes.insert(id.to_string(), row);
+        }
+        let base = Base {
+            project: ProjectFile::from_state(&ProjectState::default()),
+            assistant: None,
+            on_disk: false,
+            through: EventId(5),
+            history: Some(
+                serde_json::json!({"root":0,"head":5,"next_id":6,"pruned_until_ms":null,"nodes":nodes}),
+            ),
+        };
+        write_atomic(sink.dir(), BASE_FILE, &base).unwrap();
+        let (_, tree) = recover_dir(sink.dir(), 2000, 32768).unwrap();
+        assert_eq!((tree.root, tree.head), (4, 5));
+        assert!(tree.pruned && tree.bytes <= 32768);
+        assert_eq!(tree.nodes[&5].forward.len(), 1);
     }
 }
